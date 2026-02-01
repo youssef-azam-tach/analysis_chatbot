@@ -1,0 +1,29 @@
+# Virtual environments
+venv/
+.env/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Jupyter / temp
+.ipynb_checkpoints/
+*.log
+*.tmp
+*.bak
+
+# Data (large files)
+data/
+ui/streamlit/data/
+
+# OS / editor junk
+.DS_Store
+.vscode/
+.idea/
+
+# Streamlit
+.streamlit/
+
+# PDFs / reports (generated)
+*.pdf

@@ -1,0 +1,41 @@
+app:
+  name: "Data Analysis & AI Chatbot"
+  version: "0.1.0"
+  debug: true
+
+data_sources:
+  enabled:
+    - excel
+  # - csv
+  # - sql_server
+  # - postgresql
+  # - oracle
+  # - mysql
+
+excel:
+  supported_formats:
+    - .xlsx
+    - .xls
+  max_file_size_mb: 100
+
+llm:
+  provider: "ollama"
+  model: "qwen2.5:7b"
+  embedding_model: "nomic-embed-text:latest"
+  temperature: 0.5
+  max_tokens: 1024
+
+rag:
+  chunk_size: 500
+  chunk_overlap: 50
+  similarity_threshold: 0.5
+  top_k: 5
+
+database:
+  chroma_db_path: "./data/chroma_db"
+  persist: true
+
+ui:
+  theme: "light"
+  page_icon: "📊"
+  layout: "wide"
