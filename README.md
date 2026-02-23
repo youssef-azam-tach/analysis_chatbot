@@ -1,205 +1,164 @@
-# Boilerplates
+# AI Analysis Platform (Monorepo)
 
-Initial setups for FastAPI, NodeJS, Java, DotNet, Flutter and ReactJS (Under Development, and the readme file not completed, validated, or verified)
+End-to-end AI analytics platform with three main runtime services:
 
-## Table of content
+- Core Backend (authentication, users, workspaces, orchestration)
+- AI Engine (analysis, cleaning, schema, visualization, chat, reports)
+- Frontend (React + Vite SPA)
 
-- [Setups](#setups)
-  - [Table of content](#table-of-content)
-  - [Development](#development)
-    - [Prepatre the Templates](#Prepatre-the-Templates)
-    - [Prerequisites](#prerequisites)
-    - [Configuration](#configuration)
-    - [Run instructions](#run-instructions)
-    - [Helpful tools for development](#helpful-tools-for-development)
-  - [Docker instructions](#docker-instructions)
-    - [For development](#for-development)
-    - [For production](#for-production)
-    - [Helpful commands](#helpful-commands)
-  - [Architecture](#architecture)
-  - [TODOs](#todos)
-  - [CONTRIBUTION](#contribution)
+This repository also contains the shared AI modules used by the AI Engine.
 
-## Development
-### Prepatre the Templates
-- Select requoired Templates
-- Remove the rest of the templates
-- Ensure the prerequiresites[See Prerequisites section](#Prerequisites)
-- Prepare the configureations[See configuration section](#configuration)
-- Prepare docker compose file[See Docker instructions section](#Docker-instructions)
+## Repository Structure
 
-### Prerequisites
-#### For NodeJs
-- Node.js v16.13.1
-- MongoDB v5.0.8
-- Yarn v1.22.15 or higher
-#### For FastAPI API: Without DB connection
-#### For FastAPI Backend: With DB Connection
-#### For Dotnet
-#### For SpringBot
-#### For ReactJS
-#### For Flutter
-#### For ReactJS
-
-
-### Configuration
-- Copy example.dev.env to dev.env 
-- Select the require vatrable based on selected template and databses
-- Adapt you variables if needed as
-
-- Database (MongoDB)
-
-```env
-MONGODB_USER=${USER}
-MONGODB_PASSWORD=${PASSWORD}
-MONGODB_DATABASE=${DATABASE}
-MONGODB_LOCAL_PORT=${LOCAL_PORT}
-MONGODB_DOCKER_PORT=${DOCKER_PORT}
-```
-
-- Ports
-
-```env
-NODE_LOCAL_PORT=${NODE_LOCAL_PORT}
-NODE_DOCKER_PORT=${NODE_DOCKER_PORT}
-REACT_LOCAL_PORT=${REACT_LOCAL_PORT}
-```
-
-- Backend URL
-
-```env
-REACT_APP_BACKEND_BASE_URL=${URL}
-```
-
-example (Windows) : `REACT_APP_BACKEND_BASE_URL=http://localhost:${NODE_LOCAL_PORT}`
-
-example (Linux) : `REACT_APP_BACKEND_BASE_URL=http://0.0.0.0:${NODE_LOCAL_PORT}`
-
-### Run instructions
-#### For NodeJS
-- Install node server dependencies
-
-```sh
-cd server
-yarn
-```
-
-- You need to load env variables for the server from dev.env
-
-```sh
-# For windows (use Gitbash)
-set -a && source ../dev.env && set +a
-# Or
-export $(grep -v '^#' ../dev.env | xargs)
-
-# For linux
-source ../dev.env
-
-```
-
-- Run node server
-
-```sh
-yarn start
-```
-#### For ReactJS
-
-- Install react client dependencies
-
-```sh
-cd client
-yarn
-```
-
-- You need to load env variables for the client from dev.env
-
-```sh
-# For windows (use Gitbash)
-set -a && source ../dev.env && set +a
-# Or
-export $(grep -v '^#' ../dev.env | xargs)
-
-# For linux
-source ../dev.env
-
-```
-
-- Run react client
-
-```sh
-yarn start
-```
-
-### Helpful tools for development
-
-- `Visual studio code` (VS)
-- `Markdownlint` VS extension
-- `ESLint` VS extension
-
-## Docker instructions
-
-### For development
-
-- Select required templates and remove the rest
-- Copy example.dev.env to dev.env and adapt you variables [See configuration section](#configuration)
-
-
-- To run docker-compose file
-
-```sh
-docker-compose -f docker-compose.dev.yml --env-file example.dev.env up -d
-```
-
-### For production
-
-- Copy example.env to .env and adapt you variables [See configuration section](#configuration)
-
-- Build and Publish server image
-
-```sh
-cd server
-make build
-make publish
-```
-
-- Build and Publish client image
-
-```sh
-cd client
-make build
-make publish
-```
-
-- Test it
-
-```sh
-docker-compose up -d
-```
-
-### Helpful commands
-
-- To connect to it server's or client's terminal
-
-```sh
-docker-compose -f docker-compose.dev.yml --env-file dev.env exec [server|client] /bin/bash
-```
-
-- Verify logs file for the server or client
-
-```sh
-docker-compose -f docker-compose.dev.yml --env-file dev.env logs [server|client]
+```text
+analysis-everything/
+├── AI-partion/                     # Shared AI modules (analysis/models/pipelines/ui)
+├── Backend_apis/
+│   ├── fastapi-backend/            # Service 1: Core backend API
+│   └── fastapi-api/                # Service 2: AI engine API
+├── frontend/                       # Service 3: React frontend
+├── docker-compose.yml              # Full stack runtime
+├── API_DOCUMENTATION.md            # API reference
+└── README.md
 ```
 
 ## Architecture
 
-- [Database-architecture](./docs/database_arch.drawio)
-- [General-architecture](./docs/general_arch.drawio)
-- [Detailed-architecture](./docs/detailsed_arch.drawio)
+- PostgreSQL for core backend persistence
+- Core backend connects to AI engine for advanced analysis workflows
+- AI engine mounts [AI-partion](AI-partion) as read-only modules directory
+- Frontend proxies requests to backend and AI engine through Nginx configuration
 
-## TODOs
+## Main Capabilities
 
-- [TODOs](./docs/TODOs.md)
+- Multi-file upload and dataset session management
+- Schema analysis + manual relationships
+- Data quality checks and cleaning workflows
+- Strategic AI analysis with chart recommendations
+- KPI and visualization builders
+- Dashboard builder (multi-widget)
+- Persistent AI chat with pins
+- Report export (PDF/PPTX)
+- Quick single-file analysis page outside the main pipeline flow
 
-## CONTRIBUTION
+## Prerequisites
 
-- [CONTRIBUTION](./docs/CONTRIBUTION.md)
+- Docker + Docker Compose
+- GNU Make
+- (Recommended) Node.js 20+ for local frontend development
+- (Recommended) Python 3.11+ for local backend development
+- Ollama running on host (default expected at `127.0.0.1:11434`)
+
+## Environment Configuration
+
+Create a root `.env` file (next to `docker-compose.yml`) with at least these keys:
+
+```env
+COMPOSE_PROJECT_NAME=ai-analysis
+IMAGE_VERSION=1.0.1
+
+APP_NAME_BACKEND=ai-analysis-backend
+APP_NAME_ENGINE=ai-analysis-engine
+APP_NAME_FRONTEND=ai-analysis-frontend
+
+POSTGRES_DB=ai_analysis
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+POSTGRES_PORT=4809
+
+BACKEND_PORT=9867
+ENGINE_PORT=3490
+FRONTEND_PORT=8081
+
+OLLAMA_HOST=http://host.docker.internal:11435
+```
+
+Adjust values to your environment as needed.
+
+## Run with Docker (Recommended)
+
+1) Build images
+
+```bash
+cd Backend_apis/fastapi-backend && make build
+cd ../fastapi-api && make build
+cd ../../frontend && make build
+cd ..
+```
+
+2) Start full stack
+
+```bash
+docker compose up -d
+```
+
+3) Check status and logs
+
+```bash
+docker compose ps
+docker compose logs -f frontend
+docker compose logs -f backend
+docker compose logs -f ai-engine
+```
+
+4) Stop stack
+
+```bash
+docker compose down
+```
+
+To remove volumes too:
+
+```bash
+docker compose down -v
+```
+
+## Local Development (Without Docker)
+
+### Frontend
+
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
+### AI Engine (Service 2)
+
+```bash
+cd Backend_apis/fastapi-api
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn src.main:app --reload --port 3490
+```
+
+### Core Backend (Service 1)
+
+```bash
+cd Backend_apis/fastapi-backend
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn src.main:app --reload --port 9867
+```
+
+## API Documentation
+
+See [API_DOCUMENTATION.md](API_DOCUMENTATION.md) for endpoint details and payload examples.
+
+## Important Notes
+
+- Keep secrets only in `.env` and do not commit real credentials.
+- The root [.gitignore](.gitignore) is configured for Python, Node, logs, env files, and generated runtime artifacts.
+- If Docker build fails in frontend, run `npm run build` inside [frontend](frontend) to inspect TypeScript errors directly.
+
+## Troubleshooting
+
+- Ollama errors:
+  - Ensure host Ollama is running.
+  - Verify `OLLAMA_HOST` matches your setup.
+- Port conflicts:
+  - Change `BACKEND_PORT`, `ENGINE_PORT`, `FRONTEND_PORT`, and `POSTGRES_PORT` in `.env`.
+- Missing images:
+  - Re-run the three `make build` commands before `docker compose up -d`.

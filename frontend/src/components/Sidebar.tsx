@@ -1,4 +1,4 @@
-import { NavLink, useLocation, useNavigate } from 'react-router-dom';
+import { NavLink, useNavigate } from 'react-router-dom';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/stores/auth-store';
 import { useWorkspaceStore } from '@/stores/workspace-store';
@@ -6,7 +6,7 @@ import {
   Home, Upload, Target, AlertTriangle, Sparkles,
   BarChart3, LayoutDashboard, MessageCircle, FileText, Brain,
   LogOut, Database,
-  PanelLeftClose, PanelLeft, Layers, Check, FileSpreadsheet
+  PanelLeftClose, PanelLeft, Layers, FileSpreadsheet
 } from 'lucide-react';
 
 const navItems = [
@@ -34,10 +34,6 @@ export function Sidebar({ collapsed, setCollapsed }: SidebarProps) {
   const { user, logout } = useAuthStore();
   const { activeWorkspace } = useWorkspaceStore();
   const navigate = useNavigate();
-  const location = useLocation();
-
-  const flowRoutes = ['/upload', '/schema', '/quality', '/cleaning', '/goals', '/analysis', '/kpis', '/visualization', '/dashboard', '/chat', '/reports'];
-  const currentFlowIdx = flowRoutes.findIndex((r) => r === location.pathname);
 
   const handleLogout = () => { logout(); navigate('/login'); };
 
@@ -80,45 +76,6 @@ export function Sidebar({ collapsed, setCollapsed }: SidebarProps) {
           </NavLink>
         ))}
 
-        {!collapsed && (
-          <div className="mt-4 pt-4 border-t border-[var(--border)]">
-            <p className="px-3 mb-2 text-[10px] uppercase tracking-wider text-[var(--text-muted)] font-semibold">Workflow Progress</p>
-            <div className="px-2">
-              {flowRoutes.map((route, idx) => {
-                const nav = navItems.find((n) => n.to === route);
-                if (!nav) return null;
-                const isCompleted = currentFlowIdx > idx;
-                const isCurrent = currentFlowIdx === idx;
-                const isUpcoming = currentFlowIdx < idx;
-
-                return (
-                  <div key={`flow-${route}`} className="relative pl-8 py-1.5">
-                    {idx < flowRoutes.length - 1 && (
-                      <span className={cn(
-                        'absolute left-[15px] top-6 w-[2px] h-6 rounded-full',
-                        isCompleted ? 'bg-[var(--accent)]/55' : 'bg-[var(--border)]'
-                      )} />
-                    )}
-                    <span className={cn(
-                      'absolute left-0 top-2 w-7 h-7 rounded-full border flex items-center justify-center text-[11px]',
-                      isCompleted && 'bg-[var(--accent)] text-white border-[var(--accent)]',
-                      isCurrent && 'bg-[var(--accent-bg)] text-[var(--accent)] border-[var(--accent)] shadow-[0_0_0_3px_rgba(79,70,229,0.14)]',
-                      isUpcoming && 'bg-[var(--bg-secondary)] text-[var(--text-muted)] border-[var(--border)]'
-                    )}>
-                      {isCompleted ? <Check className="w-3.5 h-3.5" /> : idx + 1}
-                    </span>
-                    <p className={cn(
-                      'text-xs leading-5',
-                      isCurrent ? 'text-[var(--text-primary)] font-semibold' : isUpcoming ? 'text-[var(--text-muted)]' : 'text-[var(--text-secondary)]'
-                    )}>
-                      {nav.label}
-                    </p>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
       </nav>
 
       {/* Footer */}
