@@ -1,29 +1,72 @@
-# Virtual environments
-venv/
-.env/
-.venv/
-
-# Python cache
-__pycache__/
-*.py[cod]
-
-# Jupyter / temp
-.ipynb_checkpoints/
-*.log
-*.tmp
-*.bak
-
-# Data (large files)
-data/
-ui/streamlit/data/
-
-# OS / editor junk
+# =========================
+# Global: OS / Editors
+# =========================
 .DS_Store
-.vscode/
+Thumbs.db
+
 .idea/
+.vscode/*
+!.vscode/extensions.json
 
-# Streamlit
-.streamlit/
+# =========================
+# Secrets / Environment
+# =========================
+.env
+.env.*
+!.env.example
+dev.env
 
-# PDFs / reports (generated)
-*.pdf
+# =========================
+# Python (all services)
+# =========================
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+.venv/
+venv/
+env/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+
+# =========================
+# Node / Frontend
+# =========================
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# =========================
+# Logs / Runtime
+# =========================
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Python runtime artifacts
+*.sqlite3
+*.db
+
+# =========================
+# Project-specific generated data
+# =========================
+AI-partion/ui/streamlit/data/
+AI-partion/.streamlit/
+
+# Backend generated uploads / cache (if created locally)
+Backend_apis/fastapi-api/uploads/
+Backend_apis/fastapi-backend/uploads/

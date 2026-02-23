@@ -1,0 +1,112 @@
+# ─────────────────────────────────────────────────────────────
+# AI Data Analysis Platform — Docker Compose
+# ─────────────────────────────────────────────────────────────
+# All variables come from .env file next to this file.
+#
+# Usage:
+#   cd Backend_apis/fastapi-backend && make build   # Build Service 1
+#   cd Backend_apis/fastapi-api     && make build   # Build Service 2
+#   cd frontend                     && make build   # Build Frontend
+#   docker compose up -d               # Start everything
+#   docker compose logs -f frontend    # Follow Frontend logs
+#   docker compose down -v             # Stop + remove volumes
+# ─────────────────────────────────────────────────────────────
+
+services:
+  # ── PostgreSQL Database ──────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    container_name: ${COMPOSE_PROJECT_NAME}-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Service 1 — Auth + Core Backend ──────────────────────────
+  backend:
+    image: ${APP_NAME_BACKEND}:${IMAGE_VERSION}
+    container_name: ${COMPOSE_PROJECT_NAME}-backend
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT}:${BACKEND_PORT}"
+    env_file:
+      - .env
+    environment:
+      BACKEND_PORT: ${BACKEND_PORT}
+      POSTGRES_SERVER: db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      AI_ENGINE_URL: http://ai-engine:${ENGINE_PORT}
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - upload_storage:/app/storage/uploads
+
+  # ── Ollama Proxy (bridges host-only Ollama to Docker network) ─
+  ollama-proxy:
+    image: alpine/socat:latest
+    container_name: ${COMPOSE_PROJECT_NAME}-ollama-proxy
+    restart: unless-stopped
+    network_mode: host
+    command: TCP-LISTEN:11435,fork,reuseaddr TCP-CONNECT:127.0.0.1:11434
+
+  # ── Service 2 — AI Engine ───────────────────────────────────
+  ai-engine:
+    image: ${APP_NAME_ENGINE}:${IMAGE_VERSION}
+    container_name: ${COMPOSE_PROJECT_NAME}-engine
+    restart: unless-stopped
+    ports:
+      - "${ENGINE_PORT}:${ENGINE_PORT}"
+    env_file:
+      - .env
+    environment:
+      ENGINE_PORT: ${ENGINE_PORT}
+      OLLAMA_HOST: ${OLLAMA_HOST}
+      AI_MODULES_PATH: /app/ai-modules
+      UPLOAD_DIR: /app/storage/uploads
+      CHROMA_DB_PATH: /app/storage/chromadb
+    volumes:
+      - upload_storage:/app/storage/uploads
+      - chromadb_data:/app/storage/chromadb
+      - ./AI-partion:/app/ai-modules:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - ollama-proxy
+
+  # ── Service 3 — Frontend (Nginx + React SPA) ────────────────
+  frontend:
+    image: ${APP_NAME_FRONTEND}:${IMAGE_VERSION}
+    container_name: ${COMPOSE_PROJECT_NAME}-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT}:${FRONTEND_PORT}"
+    env_file:
+      - .env
+    environment:
+      FRONTEND_PORT: ${FRONTEND_PORT}
+      BACKEND_HOST: backend
+      BACKEND_PORT: ${BACKEND_PORT}
+      ENGINE_HOST: ai-engine
+      ENGINE_PORT: ${ENGINE_PORT}
+    depends_on:
+      - backend
+      - ai-engine
+
+volumes:
+  postgres_data:
+  upload_storage:
+  chromadb_data:

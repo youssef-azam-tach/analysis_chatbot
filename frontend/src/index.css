@@ -1,0 +1,130 @@
+@import "tailwindcss";
+
+/* ── Design Tokens (CSS Variables) — Light Mode (Figma) ────── */
+:root {
+  /* Spacing scale (8px system) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 28px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  --bg-primary: #F9FAFB;
+  --bg-secondary: #F3F4F6;
+  --bg-card: #FFFFFF;
+  --bg-card-hover: #F9FAFB;
+  --bg-input: #F3F4F6;
+  --accent: #4F46E5;
+  --accent-hover: #3730A3;
+  --accent-muted: #818CF8;
+  --accent-bg: rgba(79, 70, 229, 0.08);
+  --success: #10B981;
+  --success-bg: rgba(16, 185, 129, 0.08);
+  --warning: #F59E0B;
+  --warning-bg: rgba(245, 158, 11, 0.08);
+  --error: #EF4444;
+  --error-bg: rgba(239, 68, 68, 0.08);
+  --info: #3B82F6;
+  --info-bg: rgba(59, 130, 246, 0.08);
+  --text-primary: #1F2937;
+  --text-secondary: #6B7280;
+  --text-muted: #9CA3AF;
+  --border: #E5E7EB;
+  --border-hover: #D1D5DB;
+  --sidebar-bg: #FFFFFF;
+  --sidebar-hover: #F3F4F6;
+  --sidebar-active: rgba(79, 70, 229, 0.08);
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+  --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.07), 0 2px 4px -2px rgba(0,0,0,0.05);
+  --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.08), 0 4px 6px -4px rgba(0,0,0,0.04);
+
+  --radius-sm: 10px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+
+  --transition-fast: 150ms;
+  --transition-normal: 220ms;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { font-family: 'Inter', system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; }
+body { background-color: var(--bg-primary); color: var(--text-primary); min-height: 100vh; line-height: 1.5; }
+
+h1, h2, h3, h4 { line-height: 1.2; letter-spacing: -0.01em; }
+h1 { font-size: clamp(1.5rem, 2.6vw, 2rem); font-weight: 700; }
+h2 { font-size: clamp(1.25rem, 2vw, 1.5rem); font-weight: 650; }
+h3 { font-size: 1.05rem; font-weight: 600; }
+p { line-height: 1.65; }
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg-secondary); }
+::-webkit-scrollbar-thumb { background: var(--border-hover); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+.glass { background: rgba(255,255,255,0.76); backdrop-filter: blur(12px); border: 1px solid var(--border); border-radius: var(--radius-lg); }
+.gradient-accent { background: linear-gradient(135deg, var(--accent) 0%, #7C3AED 100%); }
+.gradient-text { background: linear-gradient(135deg, #4F46E5 0%, #7C3AED 50%, #9333EA 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+
+.app-surface {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-sm);
+}
+
+.page-shell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  padding: var(--space-6);
+}
+
+@media (max-width: 1024px) {
+  .page-shell { padding: var(--space-4); gap: var(--space-4); }
+}
+
+.animate-fade-in { animation: fadeIn 0.28s ease-out; }
+@keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+.animate-slide-in { animation: slideIn 0.25s ease-out; }
+@keyframes slideIn { from { opacity:0; transform:translateX(-12px); } to { opacity:1; transform:translateX(0); } }
+
+button, a, input, select, textarea {
+  transition: all var(--transition-normal) ease;
+}
+
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--accent) 70%, white);
+  outline-offset: 1px;
+}
+
+.js-plotly-plot .plotly .modebar { right: 8px !important; top: 4px !important; }
+.js-plotly-plot .plotly .modebar-btn { color: var(--text-muted) !important; }
+.js-plotly-plot .plotly .modebar-btn:hover { color: var(--accent) !important; }
+
+/* ── Scrollbar utilities ─── */
+.scrollbar-thin::-webkit-scrollbar { width: 4px; height: 4px; }
+.scrollbar-thin::-webkit-scrollbar-thumb { background: var(--border-hover); border-radius: 2px; }
+
+/* ── Schema markdown ─── */
+.schema-markdown h1, .schema-markdown h2, .schema-markdown h3, .schema-markdown h4 {
+  color: var(--text-primary); font-weight: 600; margin-top: 1.25em; margin-bottom: 0.5em;
+}
+.schema-markdown h3 { font-size: 1rem; }
+.schema-markdown h4 { font-size: 0.875rem; }
+.schema-markdown p { color: var(--text-secondary); line-height: 1.7; margin-bottom: 0.75em; font-size: 0.8125rem; }
+.schema-markdown ul, .schema-markdown ol { padding-left: 1.25em; margin-bottom: 0.75em; color: var(--text-secondary); font-size: 0.8125rem; }
+.schema-markdown li { margin-bottom: 0.35em; line-height: 1.6; }
+.schema-markdown li::marker { color: var(--accent); }
+.schema-markdown strong { color: var(--text-primary); }
+.schema-markdown code { background: var(--accent-bg); color: var(--accent); padding: 0.15em 0.4em; border-radius: 4px; font-size: 0.8em; }
+.schema-markdown hr { border: none; border-top: 1px solid var(--border); margin: 1.5em 0; }
+
+/* ── Mermaid overrides ─── */
+.mermaid-erd svg { width: 100%; height: auto; }
+
