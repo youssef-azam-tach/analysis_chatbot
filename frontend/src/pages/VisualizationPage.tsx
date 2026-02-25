@@ -34,6 +34,7 @@ export default function VisualizationPage() {
   // Dataset awareness
   const [datasetKeys, setDatasetKeys] = useState<string[]>([]);
   const [datasetsInfo, setDatasetsInfo] = useState<Record<string, DatasetInfo>>({});
+  const [hasPipelineFinal, setHasPipelineFinal] = useState(false);
   const [selectedDataset, setSelectedDataset] = useState('__all__');
 
   // Manual builder
@@ -64,7 +65,11 @@ export default function VisualizationPage() {
       const keys: string[] = info?.dataframe_keys || [];
       setDatasetKeys(keys);
       setDatasetsInfo(info?.datasets_info || {});
-      if (keys.length > 0 && selectedDataset === '') setSelectedDataset(keys.length > 1 ? '__all__' : keys[0]);
+      const pipelineFinal = Boolean(info?.has_pipeline_final);
+      setHasPipelineFinal(pipelineFinal);
+      if (keys.length > 0 && selectedDataset === '') {
+        setSelectedDataset(pipelineFinal ? '__working__' : keys.length > 1 ? '__all__' : keys[0]);
+      }
       if (keys.length >= 2) { if (!crossDs1) setCrossDs1(keys[0]); if (!crossDs2) setCrossDs2(keys[1]); }
     } catch { /* silent */ }
   }, [sessionId]);
@@ -88,6 +93,13 @@ export default function VisualizationPage() {
   }, [user?.id, activeWorkspace?.id, sessionId]);
 
   useEffect(() => {
+    if (!hasPipelineFinal) return;
+    if (selectedDataset === '__all__' && datasetKeys.length > 1) {
+      setSelectedDataset('__working__');
+    }
+  }, [hasPipelineFinal, selectedDataset, datasetKeys.length]);
+
+  useEffect(() => {
     if (!cacheHydrated) return;
     savePageState('visualization-page', {
       userId: user?.id,
@@ -105,7 +117,7 @@ export default function VisualizationPage() {
   // Reset builder column picks when dataset changes
   useEffect(() => { setXCol(''); setYCol(''); }, [selectedDataset]);
 
-  const columnNames = selectedDataset && selectedDataset !== '__all__' && datasetsInfo[selectedDataset]
+  const columnNames = selectedDataset && selectedDataset !== '__all__' && selectedDataset !== '__working__' && datasetsInfo[selectedDataset]
     ? datasetsInfo[selectedDataset].columns
     : Object.values(datasetsInfo).flatMap(d => d.columns).filter((v, i, a) => a.indexOf(v) === i);
 
@@ -142,7 +154,7 @@ export default function VisualizationPage() {
       const keysToProcess = selectedDataset === '__all__' ? datasetKeys : [selectedDataset];
       const allParsed: ChartSpec[] = [];
       for (const key of keysToProcess) {
-        const parsed = await aiRecommendSingle(key);
+        const parsed = await aiRecommendSingle(key === '__working__' ? '' : key);
         allParsed.push(...parsed);
       }
       setCharts(allParsed);
@@ -186,7 +198,7 @@ export default function VisualizationPage() {
       const keysToProcess = selectedDataset === '__all__' ? datasetKeys : [selectedDataset];
       const newCharts: ChartSpec[] = [];
       for (const key of keysToProcess) {
-        const chart = await buildChartSingle(key);
+        const chart = await buildChartSingle(key === '__working__' ? '' : key);
         if (chart) newCharts.push(chart);
       }
       if (newCharts.length > 0) {
@@ -307,7 +319,7 @@ export default function VisualizationPage() {
       </div>
 
       {/* Dataset selector */}
-      {datasetKeys.length > 1 && (
+      {(datasetKeys.length > 1 || hasPipelineFinal) && (
         <Card className="mb-6">
           <div className="flex items-center gap-4">
             <Database className="w-5 h-5 text-[var(--accent)]" />
@@ -317,10 +329,17 @@ export default function VisualizationPage() {
               onChange={setSelectedDataset}
               placeholder="Select dataset"
               options={[
+                ...(hasPipelineFinal ? [{ value: '__working__', label: 'Working Final Dataset (joined)' }] : []),
                 { value: '__all__', label: `All Datasets (${datasetKeys.length})` },
                 ...datasetKeys.map(k => ({ value: k, label: shortName(k) })),
               ]}
             />
+            {selectedDataset === '__working__' && (
+              <div className="flex items-center gap-2 text-sm text-emerald-700 mt-5">
+                <FolderOpen className="w-4 h-4" />
+                <span>Using relationship-aware finalized dataset</span>
+              </div>
+            )}
             {selectedDataset === '__all__' && (
               <div className="flex items-center gap-2 text-sm text-[var(--text-secondary)] mt-5">
                 <FolderOpen className="w-4 h-4" />

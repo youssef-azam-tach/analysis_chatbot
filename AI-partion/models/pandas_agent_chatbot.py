@@ -8,7 +8,7 @@ import pandas as pd
 import logging
 import numpy as np
 import re
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Any
 from langchain_ollama import ChatOllama
 
 logging.basicConfig(level=logging.INFO)
@@ -66,6 +66,38 @@ class PandasAgentChatbot:
             cols = list(df.columns)
             info_parts.append(f"DataFrame `{var_name}`: {df.shape[0]} rows, {df.shape[1]} columns\nColumns: {cols}")
         return "\n\n".join(info_parts)
+
+    def _relationships_text(self, context: Optional[Dict[str, Any]]) -> str:
+        if not context:
+            return "No explicit relationships provided."
+        rels = context.get("manual_relationships") or []
+        if not rels:
+            return "No explicit relationships provided. Infer joins carefully from key-like columns and business semantics."
+        lines = []
+        for rel in rels[:25]:
+            lines.append(
+                f"- {rel.get('file1')}[{rel.get('column1')}] -> {rel.get('file2')}[{rel.get('column2')}] ({rel.get('relationship_type', 'related')})"
+            )
+        return "\n".join(lines)
+
+    def _analysis_instruction(self, context: Optional[Dict[str, Any]]) -> str:
+        mode = str((context or {}).get("analysis_mode") or "balanced").lower()
+        if mode == "deep":
+            return (
+                "Use deep analysis: validate assumptions, test multiple groupings, include trend/comparison checks, "
+                "and surface risks/limitations explicitly."
+            )
+        if mode == "fast":
+            return "Use fast analysis: prioritize direct calculation with minimal overhead and concise explanation."
+        return "Use balanced analysis: accurate calculations with concise but high-value interpretation."
+
+    def _response_style_instruction(self, context: Optional[Dict[str, Any]]) -> str:
+        style = str((context or {}).get("response_style") or "executive").lower()
+        if style == "technical":
+            return "Respond in technical analyst style with clear formulas/logic and computed evidence."
+        if style == "deep":
+            return "Respond in expert style with sections: Executive Answer, Evidence, Method, Assumptions, Next Actions."
+        return "Respond in executive style: sharp answer first, then key evidence and recommendation."
     
     def _extract_code(self, text: str) -> Optional[str]:
         """Extract Python code from LLM response"""
@@ -85,6 +117,20 @@ class PandasAgentChatbot:
                 return code
         
         return None
+
+    def _strip_markdown_text(self, text: str) -> str:
+        if not text:
+            return ""
+        cleaned = str(text)
+        cleaned = re.sub(r"```[\s\S]*?```", "", cleaned)
+        cleaned = re.sub(r"^\s{0,3}#{1,6}\s*", "", cleaned, flags=re.MULTILINE)
+        cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", cleaned)
+        cleaned = re.sub(r"\*(.*?)\*", r"\1", cleaned)
+        cleaned = re.sub(r"`([^`]*)`", r"\1", cleaned)
+        cleaned = re.sub(r"^\s*[-*+]\s+", "", cleaned, flags=re.MULTILINE)
+        cleaned = re.sub(r"^\s*\d+[\.)]\s+", "", cleaned, flags=re.MULTILINE)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        return cleaned.strip()
     
     def _execute_code(self, code: str) -> str:
         """Execute Python code safely on DataFrames"""
@@ -126,7 +172,7 @@ class PandasAgentChatbot:
         except Exception as e:
             return f"Error executing code: {str(e)}"
     
-    def ask(self, question: str, temperature: Optional[float] = None) -> Dict:
+    def ask(self, question: str, temperature: Optional[float] = None, context: Optional[Dict[str, Any]] = None) -> Dict:
         """
         Ask a question and get answer based on DataFrame analysis
         """
@@ -136,21 +182,43 @@ class PandasAgentChatbot:
             # Build prompt
             df_info = self._get_df_info()
             
-            prompt = f"""You are a data analyst. Analyze the data and answer the question.
+            relationships_text = self._relationships_text(context)
+            analysis_instruction = self._analysis_instruction(context)
+            response_style_instruction = self._response_style_instruction(context)
+            prefer_joins = bool((context or {}).get("prefer_joins", True))
+            use_all_tables = bool((context or {}).get("use_all_tables", True))
+
+            prompt = f"""You are a senior Data Engineer + Data Analyst + Data Scientist.
+Analyze the data rigorously and answer the user question with evidence.
 
 AVAILABLE DATA:
 {df_info}
 
+RELATIONSHIPS / JOIN HINTS:
+{relationships_text}
+
 RULES:
-1. Write Python pandas code to answer the question
-2. Put your code in ```python ``` blocks
+1. Write Python pandas code to answer the question.
+2. Put your code in one ```python ``` block
 3. Use print() to show results
 4. NEVER write SQL - only Python pandas code
 5. Use 'df' for single DataFrame or 'df1', 'df2' for multiple
+6. {'Use all available tables and join when needed to answer correctly.' if use_all_tables else 'Use current working table only unless absolutely necessary.'}
+7. {'Prefer explicit joins based on provided relationships before heuristic joins.' if prefer_joins else 'Use joins only when essential.'}
+8. Never aggregate obvious identifier keys as business measures.
+9. Validate join result quality (row counts, null rates in critical columns) before concluding.
+10. Think like a professional analytics team member; avoid generic responses.
+11. If the answer cannot be computed from available data, print exactly: INSUFFICIENT_DATA
+
+ANALYSIS MODE:
+{analysis_instruction}
+
+RESPONSE STYLE:
+{response_style_instruction}
 
 QUESTION: {question}
 
-Write the Python code to answer this, then explain the result."""
+Return ONLY the Python code block, no explanation text."""
 
             # Get LLM response
             response = self.llm.invoke(prompt)
@@ -158,7 +226,27 @@ Write the Python code to answer this, then explain the result."""
             
             # Extract and execute code if present
             code = self._extract_code(llm_text)
+            if not code:
+                retry_prompt = prompt + "\n\nReturn ONLY one Python code block that computes the answer."
+                retry_response = self.llm.invoke(retry_prompt)
+                retry_text = retry_response.content if hasattr(retry_response, 'content') else str(retry_response)
+                code = self._extract_code(retry_text)
             code_output = ""
+
+            if not code:
+                safe_answer = (
+                    "I could not produce a reliable computed answer from the available tables/columns. "
+                    "Please rephrase the question with exact field names or clarify the required metric."
+                )
+                self.conversation_history.append({"role": "user", "content": question})
+                self.conversation_history.append({"role": "assistant", "content": safe_answer, "code": None, "output": ""})
+                return {
+                    "answer": safe_answer,
+                    "code": None,
+                    "output": "",
+                    "error": None,
+                    "success": True
+                }
             
             if code:
                 logger.info(f"Executing code: {code[:100]}...")
@@ -166,7 +254,7 @@ Write the Python code to answer this, then explain the result."""
                 logger.info(f"Code output: {code_output[:200]}...")
                 
                 # Get final answer with code results
-                final_prompt = f"""Based on the data analysis:
+                final_prompt = f"""Based on the executed analysis, produce a strong professional plain-text answer.
 
 Question: {question}
 
@@ -178,13 +266,23 @@ Code executed:
 Result:
 {code_output}
 
-Provide a clear, concise answer based on these actual results. Be specific with numbers from the output."""
+Requirements:
+- Be explicit and numeric; cite concrete values from output.
+- If multiple tables were used, mention join logic briefly.
+- If uncertainty exists, state it clearly.
+- End with one actionable recommendation.
+- Do NOT use markdown symbols (#, *, -, backticks, code blocks).
+
+Style:
+{response_style_instruction}
+
+Provide the final answer now."""
 
                 final_response = self.llm.invoke(final_prompt)
                 answer = final_response.content if hasattr(final_response, 'content') else str(final_response)
+                answer = self._strip_markdown_text(answer)
             else:
-                # No code found, use LLM response directly
-                answer = llm_text
+                answer = self._strip_markdown_text(llm_text)
             
             # Store in conversation history
             self.conversation_history.append({"role": "user", "content": question})

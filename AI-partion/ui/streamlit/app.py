@@ -2293,6 +2293,15 @@ def render_quick_excel_analysis():
         }
     if 'quick_excel_analysis' not in st.session_state:
         st.session_state.quick_excel_analysis = None
+    if 'quick_excel_chat_settings' not in st.session_state:
+        st.session_state.quick_excel_chat_settings = {
+            "analysis_mode": "deep",
+            "response_style": "deep",
+            "strict_mode": False,
+            "table_scope": "all",
+            "prefer_joins": True,
+            "temperature": 0.0,
+        }
     
     # ========== FILE UPLOAD ==========
     st.markdown("---")
@@ -2570,7 +2579,42 @@ def render_quick_excel_analysis():
         
         with export_cols[0]:
             if st.button("📄 Export as PDF", use_container_width=True, key="quick_export_pdf"):
-                st.info("💡 Use Ctrl+P / Cmd+P → Save as PDF for best results")
+                try:
+                    from analysis.report_generator import generate_strategic_pdf
+                    import tempfile
+
+                    report_data = {
+                        "title": f"Quick Excel Analysis - {context.get('purpose', 'Analysis')}",
+                        "executive_summary": "\n".join(analysis.get("key_findings", [])) or "Quick Excel analysis summary",
+                        "insights": [
+                            {"title": f"Finding {idx+1}", "finding": finding}
+                            for idx, finding in enumerate(analysis.get("key_findings", [])[:6])
+                        ],
+                        "recommendations": [
+                            {"title": f"Recommendation {idx+1}", "description": rec, "priority": "Medium"}
+                            for idx, rec in enumerate(analysis.get("recommendations", [])[:6])
+                        ],
+                    }
+
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                        output_path = tmp_file.name
+
+                    generate_strategic_pdf(report_data, output_path)
+                    with open(output_path, "rb") as f:
+                        st.download_button(
+                            "💾 Download PDF",
+                            data=f,
+                            file_name="quick_excel_analysis.pdf",
+                            mime="application/pdf",
+                            key="quick_excel_pdf_download",
+                        )
+                    try:
+                        os.remove(output_path)
+                    except Exception:
+                        pass
+                except Exception as pdf_error:
+                    st.warning(f"Unable to generate PDF directly: {str(pdf_error)}")
+                    st.info("💡 Use Ctrl+P / Cmd+P → Save as PDF as fallback")
         
         with export_cols[1]:
             if st.button("📊 Export Summary", use_container_width=True, key="quick_export_summary"):
@@ -2595,6 +2639,47 @@ def render_quick_excel_analysis():
         st.markdown("---")
         st.markdown("### 💬 Quick Questions")
         st.markdown("*Ask questions about this Excel file (answers will only reference this data)*")
+
+        settings_cols = st.columns(3)
+        with settings_cols[0]:
+            st.session_state.quick_excel_chat_settings["analysis_mode"] = st.selectbox(
+                "Analysis Mode",
+                ["fast", "balanced", "deep"],
+                index=["fast", "balanced", "deep"].index(st.session_state.quick_excel_chat_settings.get("analysis_mode", "deep")),
+                key="quick_excel_chat_analysis_mode"
+            )
+            st.session_state.quick_excel_chat_settings["table_scope"] = st.selectbox(
+                "Table Scope",
+                ["all", "working"],
+                index=["all", "working"].index(st.session_state.quick_excel_chat_settings.get("table_scope", "all")),
+                key="quick_excel_chat_table_scope"
+            )
+        with settings_cols[1]:
+            st.session_state.quick_excel_chat_settings["response_style"] = st.selectbox(
+                "Response Style",
+                ["executive", "technical", "deep"],
+                index=["executive", "technical", "deep"].index(st.session_state.quick_excel_chat_settings.get("response_style", "deep")),
+                key="quick_excel_chat_response_style"
+            )
+            st.session_state.quick_excel_chat_settings["prefer_joins"] = st.checkbox(
+                "Prefer Joins",
+                value=bool(st.session_state.quick_excel_chat_settings.get("prefer_joins", True)),
+                key="quick_excel_chat_prefer_joins"
+            )
+        with settings_cols[2]:
+            st.session_state.quick_excel_chat_settings["strict_mode"] = st.checkbox(
+                "Strict Evidence",
+                value=bool(st.session_state.quick_excel_chat_settings.get("strict_mode", False)),
+                key="quick_excel_chat_strict_mode"
+            )
+            st.session_state.quick_excel_chat_settings["temperature"] = st.slider(
+                "Temperature",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(st.session_state.quick_excel_chat_settings.get("temperature", 0.0)),
+                step=0.1,
+                key="quick_excel_chat_temperature"
+            )
         
         user_question = st.text_input(
             "Your question:",
@@ -2608,7 +2693,8 @@ def render_quick_excel_analysis():
                     user_question,
                     st.session_state.quick_excel_data,
                     st.session_state.quick_excel_context,
-                    analysis
+                    analysis,
+                    st.session_state.quick_excel_chat_settings,
                 )
             
             st.markdown("---")
@@ -3032,13 +3118,98 @@ DATA SUMMARY:
     return summary
 
 
-def answer_quick_excel_question(question: str, sheets_data: dict, context: dict, analysis: dict) -> str:
-    """Answer question about quick Excel analysis using LLM - with intelligent data analysis"""
+def _quick_is_id_like(series: pd.Series, col_name: str) -> bool:
+    name = str(col_name).lower()
+    tokens = [t for t in re.split(r'[^a-z0-9]+', name) if t]
+    if name in {'id', 'uuid', 'guid'} or name.endswith('_id'):
+        return True
+    if any(t in {'id', 'key', 'pk', 'fk', 'uuid', 'guid', 'rowguid'} for t in tokens):
+        return True
+    non_null = series.dropna()
+    if len(non_null) == 0:
+        return False
+    uniq_ratio = float(non_null.nunique()) / float(len(non_null))
+    is_int_like = pd.api.types.is_integer_dtype(series)
+    is_text_like = pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)
+    if len(non_null) >= 50 and uniq_ratio >= 0.995 and (is_int_like or is_text_like):
+        return True
+    return is_int_like and uniq_ratio >= 0.98
+
+
+def _quick_is_date_like(series: pd.Series, col_name: str) -> bool:
+    name = str(col_name).lower()
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return True
+    if any(tok in name for tok in ['date', 'time', 'year', 'month', 'day']):
+        return True
+    if pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series):
+        sample = series.dropna().head(100)
+        if sample.empty:
+            return False
+        parsed = pd.to_datetime(sample, errors='coerce')
+        return float(parsed.notna().mean()) >= 0.6
+    return False
+
+
+def _quick_classify_columns(df: pd.DataFrame) -> dict:
+    identifiers, measures, dimensions, dates = [], [], [], []
+    for col in df.columns:
+        s = df[col]
+        if _quick_is_id_like(s, col):
+            identifiers.append(col)
+            continue
+        if _quick_is_date_like(s, col):
+            dates.append(col)
+            continue
+        if pd.api.types.is_numeric_dtype(s):
+            measures.append(col)
+        else:
+            dimensions.append(col)
+    return {
+        "identifiers": identifiers,
+        "measures": measures,
+        "dimensions": dimensions,
+        "dates": dates,
+    }
+
+
+def _quick_join_hints(sheets_data: dict) -> list:
+    hints = []
+    items = list(sheets_data.items())
+    for i in range(len(items)):
+        left_name, left_df = items[i]
+        left_cols = set(left_df.columns)
+        for j in range(i + 1, len(items)):
+            right_name, right_df = items[j]
+            common = [c for c in left_cols.intersection(set(right_df.columns)) if str(c).strip()]
+            for col in common[:5]:
+                if _quick_is_id_like(left_df[col], col) or _quick_is_id_like(right_df[col], col):
+                    hints.append(f"{left_name}[{col}] ↔ {right_name}[{col}] (same key-like column)")
+                elif str(col).lower().endswith('date') or str(col).lower().endswith('time'):
+                    hints.append(f"{left_name}[{col}] ↔ {right_name}[{col}] (shared temporal field)")
+                else:
+                    hints.append(f"{left_name}[{col}] ↔ {right_name}[{col}] (shared business field)")
+    return list(dict.fromkeys(hints))[:12]
+
+
+def answer_quick_excel_question(question: str, sheets_data: dict, context: dict, analysis: dict, chat_settings: dict = None) -> str:
     try:
         import ollama
+
+        cfg = {
+            "analysis_mode": "deep",
+            "response_style": "deep",
+            "strict_mode": False,
+            "table_scope": "all",
+            "prefer_joins": True,
+            "temperature": 0.0,
+        }
+        if isinstance(chat_settings, dict):
+            cfg.update(chat_settings)
         
         # Prepare comprehensive data context with actual analysis
         data_context = []
+        semantic_context = []
         
         for sheet_name, df in sheets_data.items():
             # Get column statistics
@@ -3098,35 +3269,80 @@ SHEET: {sheet_name}
 {df.head(5).to_string()}"""
             
             data_context.append(sheet_info)
+
+            classes = _quick_classify_columns(df)
+            semantic_context.append(
+                f"SHEET {sheet_name}: "
+                f"Identifiers={classes['identifiers'][:6] or ['None']} | "
+                f"Measures={classes['measures'][:6] or ['None']} | "
+                f"Dimensions={classes['dimensions'][:6] or ['None']} | "
+                f"Dates={classes['dates'][:6] or ['None']}"
+            )
+
+        join_hints = _quick_join_hints(sheets_data) if cfg.get("table_scope") == "all" else []
+
+        mode_directive = {
+            "fast": "Provide direct concise answer with essential evidence only.",
+            "balanced": "Provide concise answer with supporting evidence and one recommendation.",
+            "deep": "Provide deep professional analysis with assumptions, risks, and next actions.",
+        }.get(str(cfg.get("analysis_mode", "deep")), "Provide deep professional analysis.")
+
+        style_directive = {
+            "executive": "Format as: Executive Answer, Evidence, Recommendation.",
+            "technical": "Format as: Method, Calculations, Findings, Caveats.",
+            "deep": "Format as: Executive Answer, Evidence, Join Path, Assumptions, Risks, Next Actions.",
+        }.get(str(cfg.get("response_style", "deep")), "Format as: Executive Answer, Evidence, Recommendation.")
         
         # Create an intelligent prompt
-        llm_prompt = f"""You are a smart data analyst helping a {context.get('role', 'analyst')} understand their Excel data.
+        llm_prompt = f"""You are a senior Data Engineer + Data Analyst + Data Scientist helping a {context.get('role', 'analyst')}.
 
 PURPOSE OF FILE: {context.get('purpose', 'General analysis')}
+
+ANALYSIS MODE: {cfg.get('analysis_mode', 'deep')}
+RESPONSE STYLE: {cfg.get('response_style', 'deep')}
+USE ALL TABLES: {cfg.get('table_scope', 'all') == 'all'}
+PREFER JOINS: {bool(cfg.get('prefer_joins', True))}
 
 COMPLETE DATA CONTEXT:
 {"=" * 60}
 {chr(10).join(data_context)}
 {"=" * 60}
 
+SEMANTIC COLUMN CLASSIFICATION:
+{chr(10).join(semantic_context)}
+
+JOIN CANDIDATES:
+{chr(10).join(join_hints) if join_hints else 'No explicit join hints detected.'}
+
 USER QUESTION: {question}
 
 YOUR TASK:
-1. Answer ONLY using the data provided
-2. Show specific numbers and calculations
-3. Provide meaningful insights, not just raw data
-4. If the question requires calculations, show the work
-5. If data is missing for the question, explain what would be needed
-6. Be professional but conversational
-7. Use bullet points for clarity when appropriate
+1. Answer ONLY using the data provided.
+2. If the answer needs multiple sheets, explain the join path clearly.
+3. Prefer measure-vs-dimension analysis and avoid treating identifiers as business measures.
+4. Show concrete numbers and evidence from data.
+5. If information is insufficient, state exactly what is missing.
+6. Be decisive and professional.
 
-IMPORTANT: Give a thorough, intelligent answer that helps the {context.get('role', 'analyst')} make decisions."""
+{mode_directive}
+{style_directive}
+
+IMPORTANT: Give a strong, decision-oriented answer that helps the {context.get('role', 'analyst')} act immediately."""
         
-        response = ollama.chat(model='qwen2.5:7b', messages=[
+        response = ollama.chat(model=st.session_state.get('ollama_model', 'qwen2.5:7b'), messages=[
             {'role': 'user', 'content': llm_prompt}
-        ])
+        ], options={"temperature": float(cfg.get("temperature", 0.0))})
         
-        return response['message']['content']
+        answer_text = response['message']['content']
+
+        if bool(cfg.get("strict_mode", False)):
+            if "Evidence" not in answer_text and "evidence" not in answer_text:
+                answer_text = (
+                    answer_text.rstrip()
+                    + "\n\nEvidence Note: Please verify this answer against the shown sheet summaries and key metrics before operational use."
+                )
+
+        return answer_text
     
     except Exception as e:
         return f"Unable to answer: {str(e)}\n\nTry asking a simpler question or checking if the data contains the information you're looking for."

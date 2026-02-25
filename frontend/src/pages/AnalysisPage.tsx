@@ -446,20 +446,11 @@ th{background:#f8f9fa}blockquote{border-left:4px solid #6366f1;margin:20px 0;pad
                 <h3 className="font-semibold mb-4 flex items-center gap-2"><Brain className="w-4 h-4 text-[var(--accent)]" /> Analysis Report</h3>
                 <div className="flex flex-wrap items-center gap-2 mb-4 text-xs text-[var(--text-muted)]">
                   <Badge variant="default">Generated: {new Date().toLocaleString()}</Badge>
-                  <Badge variant="default">Datasets: {result.datasets_analyzed?.length || sessionInfo?.dataframe_count || 0}</Badge>
                   <Badge variant="default">Total Rows: {totalRows.toLocaleString()}</Badge>
                 </div>
                 <div className="prose prose-invert prose-sm max-w-none schema-markdown">
                   <ReactMarkdown>{result.analysis_markdown}</ReactMarkdown>
                 </div>
-                {result.datasets_analyzed && (
-                  <div className="flex items-center gap-2 mt-4 pt-4 border-t border-[var(--border)]">
-                    <span className="text-xs text-[var(--text-muted)]">Datasets analyzed:</span>
-                    {result.datasets_analyzed.map((d: string) => (
-                      <Badge key={d} variant="default">{d}</Badge>
-                    ))}
-                  </div>
-                )}
               </Card>
             )}
 
@@ -499,6 +490,13 @@ th{background:#f8f9fa}blockquote{border-left:4px solid #6366f1;margin:20px 0;pad
             {autoVisuals && tab === 'strategic' && (
               <Card>
                 <h3 className="font-semibold mb-4 flex items-center gap-2"><BarChart3 className="w-4 h-4 text-emerald-600" /> Auto-Generated Business Visualizations</h3>
+                {Array.isArray(autoVisuals.not_useful_notes) && autoVisuals.not_useful_notes.length > 0 && (
+                  <div className="mb-4 space-y-1">
+                    {autoVisuals.not_useful_notes.map((note: string, idx: number) => (
+                      <p key={`note-${idx}`} className="text-xs text-[var(--text-muted)]">{note}</p>
+                    ))}
+                  </div>
+                )}
                 <div className="flex justify-end mb-3">
                   <Button
                     size="sm"

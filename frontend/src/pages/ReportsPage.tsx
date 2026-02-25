@@ -36,19 +36,14 @@ export default function ReportsPage() {
   }, [user]);
 
   const buildPinnedExportPayload = () => {
-    const sections: string[] = ['# Pinned Report Items'];
+    const sections: string[] = ['# Pinned Responses'];
     const plotlyCharts: any[] = [];
 
     reportItems.forEach((item: any, idx: number) => {
       const payload = item?.payload || {};
       const text = String(payload.text_markdown || payload.text || '').trim();
-      const meta = payload.metadata || {};
 
       sections.push(`## Item ${idx + 1}`);
-      sections.push(`- Chat ID: ${item.chat_id || meta.chat_id || 'N/A'}`);
-      sections.push(`- Message ID: ${item.message_id || meta.message_id || 'N/A'}`);
-      sections.push(`- Model: ${meta.model || 'N/A'}`);
-      sections.push(`- Timestamp: ${item.created_at || meta.timestamp || 'N/A'}`);
       if (text) sections.push('', text);
 
       const charts = Array.isArray(payload.charts) ? payload.charts : [];
@@ -81,11 +76,7 @@ export default function ReportsPage() {
         session_id: sessionId,
         report_type: reportType,
         analysis_markdown: payload.analysis_markdown,
-        goals: {
-          problem: 'Consolidate pinned report items',
-          objective: 'Generate export-ready summary from pinned chat insights',
-          target: 'Business stakeholders',
-        },
+        pinned_only: true,
         recommendations: [],
         plotly_charts: payload.plotly_charts,
       });

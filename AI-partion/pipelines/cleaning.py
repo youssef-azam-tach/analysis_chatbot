@@ -528,6 +528,63 @@ class PowerQueryOperations:
         result = df.copy()
         
         try:
+            def _to_series(v: Any) -> pd.Series:
+                if isinstance(v, pd.Series):
+                    return v
+                if isinstance(v, (list, tuple, np.ndarray)):
+                    return pd.Series(v, index=result.index)
+                return pd.Series([v] * len(result), index=result.index)
+
+            def IF(condition: Any, true_val: Any, false_val: Any) -> pd.Series:
+                cond_series = _to_series(condition).astype(bool)
+                t_series = _to_series(true_val)
+                f_series = _to_series(false_val)
+                return pd.Series(np.where(cond_series, t_series, f_series), index=result.index)
+
+            def COALESCE(value: Any, fallback: Any) -> pd.Series:
+                val_series = _to_series(value)
+                fb_series = _to_series(fallback)
+                return val_series.where(val_series.notna(), fb_series)
+
+            def YEAR(value: Any) -> pd.Series:
+                return pd.to_datetime(_to_series(value), errors='coerce').dt.year
+
+            def MONTH(value: Any) -> pd.Series:
+                return pd.to_datetime(_to_series(value), errors='coerce').dt.month
+
+            def DAY(value: Any) -> pd.Series:
+                return pd.to_datetime(_to_series(value), errors='coerce').dt.day
+
+            def WEEKDAY(value: Any) -> pd.Series:
+                return pd.to_datetime(_to_series(value), errors='coerce').dt.weekday
+
+            def SUM(value: Any) -> float:
+                return float(pd.to_numeric(_to_series(value), errors='coerce').sum())
+
+            def AVG(value: Any) -> float:
+                return float(pd.to_numeric(_to_series(value), errors='coerce').mean())
+
+            def MEDIAN(value: Any) -> float:
+                return float(pd.to_numeric(_to_series(value), errors='coerce').median())
+
+            def MIN(value: Any) -> Any:
+                series = _to_series(value)
+                if pd.api.types.is_numeric_dtype(series):
+                    return float(pd.to_numeric(series, errors='coerce').min())
+                return series.min()
+
+            def MAX(value: Any) -> Any:
+                series = _to_series(value)
+                if pd.api.types.is_numeric_dtype(series):
+                    return float(pd.to_numeric(series, errors='coerce').max())
+                return series.max()
+
+            def COUNT(value: Any) -> int:
+                return int(_to_series(value).notna().sum())
+
+            def NUNIQUE(value: Any) -> int:
+                return int(_to_series(value).nunique(dropna=True))
+
             # Create a safe evaluation context with column access
             # Include built-in functions needed for type conversions
             context = {
@@ -544,6 +601,32 @@ class PowerQueryOperations:
                 'min': min,
                 'max': max,
                 'sum': sum,
+                'IF': IF,
+                'if_': IF,
+                'COALESCE': COALESCE,
+                'coalesce': COALESCE,
+                'YEAR': YEAR,
+                'year': YEAR,
+                'MONTH': MONTH,
+                'month': MONTH,
+                'DAY': DAY,
+                'day': DAY,
+                'WEEKDAY': WEEKDAY,
+                'weekday': WEEKDAY,
+                'SUM': SUM,
+                'sum_': SUM,
+                'AVG': AVG,
+                'avg': AVG,
+                'MEDIAN': MEDIAN,
+                'median': MEDIAN,
+                'MIN': MIN,
+                'min_': MIN,
+                'MAX': MAX,
+                'max_': MAX,
+                'COUNT': COUNT,
+                'count_': COUNT,
+                'NUNIQUE': NUNIQUE,
+                'nunique': NUNIQUE,
             }
             
             # Add column values as variables

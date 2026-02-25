@@ -66,7 +66,7 @@ class HybridChatbot:
         
         logger.info(f"✅ HybridChatbot initialized with {len(self.dfs) if isinstance(self.dfs, (list, dict)) else 1} datasets")
     
-    def chat(self, user_message: str, temperature: float = 0.0) -> Dict:
+    def chat(self, user_message: str, temperature: float = 0.0, context: Optional[Dict[str, Any]] = None) -> Dict:
         """
         Chat with hybrid approach: agent for answer + visualizations
         
@@ -80,7 +80,7 @@ class HybridChatbot:
         try:
             # Step 1: Get accurate answer from pandas agent
             logger.info(f"Step 1: Asking pandas agent: {user_message}")
-            agent_response = self.agent.ask(user_message, temperature=temperature)
+            agent_response = self.agent.ask(user_message, temperature=temperature, context=context)
             
             if not agent_response['success']:
                 # Agent failed - return error without visualizations
@@ -124,6 +124,7 @@ class HybridChatbot:
                 "graphs": graphs,
                 "has_visualization": len(graphs) > 0,
                 "agent_response": agent_response,
+                "analysis_context": context or {},
                 "error": None
             }
             
@@ -305,14 +306,39 @@ class HybridChatbot:
         elif isinstance(obj, pd.Index):
             return obj.tolist()
         return obj
+
+    def _is_id_like_column(self, series: pd.Series, col_name: str) -> bool:
+        name = str(col_name).lower()
+        tokens = [t for t in re.split(r'[^a-z0-9]+', name) if t]
+        if name in {'id', 'uuid', 'guid'} or name.endswith('_id'):
+            return True
+        if any(t in {'id', 'key', 'pk', 'fk', 'uuid', 'guid', 'rowguid'} for t in tokens):
+            return True
+        non_null = series.dropna()
+        if len(non_null) == 0:
+            return False
+        uniqueness_ratio = float(non_null.nunique()) / float(len(non_null))
+        return pd.api.types.is_integer_dtype(series) and uniqueness_ratio >= 0.98
+
+    def _numeric_measures(self) -> List[str]:
+        return [
+            col for col in self.df.select_dtypes(include=[np.number]).columns
+            if not self._is_id_like_column(self.df[col], col)
+        ]
+
+    def _categorical_dimensions(self) -> List[str]:
+        return [
+            col for col in self.df.select_dtypes(include=['object', 'category']).columns
+            if not self._is_id_like_column(self.df[col], col)
+        ]
     
     def _create_ranking_charts(self, question: str, answer: str) -> List[Dict]:
         """Create powerful ranking/top-N charts with better detection"""
         graphs = []
         
         try:
-            categorical_cols = self.df.select_dtypes(include=['object', 'category']).columns
-            numeric_cols = self.df.select_dtypes(include=[np.number]).columns
+            categorical_cols = self._categorical_dimensions()
+            numeric_cols = self._numeric_measures()
             
             if len(categorical_cols) > 0 and len(numeric_cols) > 0:
                 # Try to detect which columns are mentioned in question
@@ -371,8 +397,8 @@ class HybridChatbot:
         graphs = []
         
         try:
-            numeric_cols = self.df.select_dtypes(include=[np.number]).columns
-            categorical_cols = self.df.select_dtypes(include=['object', 'category']).columns
+            numeric_cols = self._numeric_measures()
+            categorical_cols = self._categorical_dimensions()
             
             # Try grouped comparison if we have categories
             if len(categorical_cols) > 0 and len(numeric_cols) >= 1:
@@ -461,7 +487,7 @@ class HybridChatbot:
                         except:
                             pass
             
-            numeric_cols = self.df.select_dtypes(include=[np.number]).columns
+            numeric_cols = self._numeric_measures()
             
             if len(datetime_cols) > 0 and len(numeric_cols) > 0:
                 date_col = datetime_cols[0]
@@ -508,8 +534,8 @@ class HybridChatbot:
         graphs = []
         
         try:
-            categorical_cols = self.df.select_dtypes(include=['object', 'category']).columns
-            numeric_cols = self.df.select_dtypes(include=[np.number]).columns
+            categorical_cols = self._categorical_dimensions()
+            numeric_cols = self._numeric_measures()
             
             if len(categorical_cols) > 0:
                 cat_col = categorical_cols[0]
@@ -571,8 +597,8 @@ class HybridChatbot:
         graphs = []
         
         try:
-            numeric_cols = self.df.select_dtypes(include=[np.number]).columns
-            categorical_cols = self.df.select_dtypes(include=['object', 'category']).columns
+            numeric_cols = self._numeric_measures()
+            categorical_cols = self._categorical_dimensions()
             
             # If we have both categorical and numeric, create a bar chart
             if len(categorical_cols) > 0 and len(numeric_cols) > 0:
@@ -638,7 +664,7 @@ class HybridChatbot:
         """Create distribution charts"""
         graphs = []
         
-        numeric_cols = self.df.select_dtypes(include=[np.number]).columns[:2]
+        numeric_cols = self._numeric_measures()[:2]
         
         for col in numeric_cols:
             df_clean = self.df[[col]].copy()
@@ -664,7 +690,7 @@ class HybridChatbot:
         """Create correlation charts"""
         graphs = []
         
-        numeric_cols = self.df.select_dtypes(include=[np.number]).columns
+        numeric_cols = self._numeric_measures()
         
         if len(numeric_cols) >= 2:
             corr_matrix = self.df[numeric_cols].corr()

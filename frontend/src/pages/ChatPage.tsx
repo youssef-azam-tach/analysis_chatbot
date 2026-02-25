@@ -43,6 +43,12 @@ export default function ChatPage() {
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [renamingChatId, setRenamingChatId] = useState('');
   const [renameValue, setRenameValue] = useState('');
+  const [analysisMode, setAnalysisMode] = useState<'fast' | 'balanced' | 'deep'>('deep');
+  const [responseStyle, setResponseStyle] = useState<'executive' | 'technical' | 'deep'>('deep');
+  const [strictMode, setStrictMode] = useState<'off' | 'on'>('off');
+  const [tableScope, setTableScope] = useState<'all' | 'working'>('all');
+  const [joinMode, setJoinMode] = useState<'on' | 'off'>('on');
+  const [temperature, setTemperature] = useState('0.0');
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -224,6 +230,12 @@ export default function ChatPage() {
         session_id: sessionId,
         model: selectedModel,
         message: text,
+        strict: strictMode === 'on',
+        analysis_mode: analysisMode,
+        response_style: responseStyle,
+        use_all_tables: tableScope === 'all',
+        prefer_joins: joinMode === 'on',
+        temperature: Number.isFinite(Number(temperature)) ? Number(temperature) : 0.0,
       });
 
       const payload = data?.data || {};
@@ -454,6 +466,68 @@ export default function ChatPage() {
             <Button variant="ghost" icon={<Trash2 className="w-4 h-4" />} onClick={clearMessages}>Clear Chat</Button>
           </div>
         </div>
+
+        <Card className="mb-3 py-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-2">
+            <Select
+              label="Analysis"
+              value={analysisMode}
+              onChange={(v) => setAnalysisMode(v as 'fast' | 'balanced' | 'deep')}
+              options={[
+                { value: 'fast', label: 'Fast' },
+                { value: 'balanced', label: 'Balanced' },
+                { value: 'deep', label: 'Deep' },
+              ]}
+            />
+            <Select
+              label="Response"
+              value={responseStyle}
+              onChange={(v) => setResponseStyle(v as 'executive' | 'technical' | 'deep')}
+              options={[
+                { value: 'executive', label: 'Executive' },
+                { value: 'technical', label: 'Technical' },
+                { value: 'deep', label: 'Deep Expert' },
+              ]}
+            />
+            <Select
+              label="Strict"
+              value={strictMode}
+              onChange={(v) => setStrictMode(v as 'off' | 'on')}
+              options={[
+                { value: 'off', label: 'Off' },
+                { value: 'on', label: 'On (evidence)' },
+              ]}
+            />
+            <Select
+              label="Tables"
+              value={tableScope}
+              onChange={(v) => setTableScope(v as 'all' | 'working')}
+              options={[
+                { value: 'all', label: 'All Tables' },
+                { value: 'working', label: 'Working Only' },
+              ]}
+            />
+            <Select
+              label="Auto Join"
+              value={joinMode}
+              onChange={(v) => setJoinMode(v as 'on' | 'off')}
+              options={[
+                { value: 'on', label: 'On' },
+                { value: 'off', label: 'Off' },
+              ]}
+            />
+            <Input
+              label="Temperature"
+              value={temperature}
+              onChange={setTemperature}
+              type="number"
+              step="0.1"
+              min="0"
+              max="1"
+              placeholder="0.0"
+            />
+          </div>
+        </Card>
 
         <Card className="flex-1 min-h-0 flex flex-col">
           <div ref={scrollRef} className="flex-1 overflow-y-auto space-y-4 pr-2 scrollbar-thin">

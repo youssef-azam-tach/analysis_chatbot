@@ -453,7 +453,11 @@ class DataQualityAssessor:
     
     def assess_data_types(self) -> List[Dict]:
         """
-        Validate data types and detect mismatches
+        Validate data types and detect inconsistent values against dominant expected type.
+        Generic logic:
+        - Evaluate numeric/datetime/boolean convertibility ratios
+        - Infer dominant expected type
+        - Flag non-convertible values as inconsistent
         
         Returns:
             List of issues with recommendations
@@ -461,20 +465,71 @@ class DataQualityAssessor:
         issues = []
         
         for col in self.df.columns:
-            # Check for numeric columns with non-numeric values
+            series = self.df[col]
+            non_null = series.dropna()
+            if len(non_null) == 0:
+                continue
+
+            as_text = non_null.astype(str).str.strip()
+            numeric_ratio = float(pd.to_numeric(as_text, errors='coerce').notna().mean())
+            datetime_ratio = float(pd.to_datetime(as_text, errors='coerce').notna().mean())
+            boolean_ratio = float(as_text.str.lower().isin({'true', 'false', 'yes', 'no', 'y', 'n', '1', '0', 't', 'f'}).mean())
+
             if col in self.numeric_cols:
-                non_numeric = pd.to_numeric(self.df[col], errors='coerce').isna().sum()
-                if non_numeric > 0:
-                    issue = {
-                        'column': col,
-                        'type': 'type_mismatch',
-                        'severity': IssueSeverity.MEDIUM,
-                        'count': non_numeric,
-                        'percentage': (non_numeric / len(self.df)) * 100,
-                        'recommendation': 'Convert to numeric or handle non-numeric values',
-                        'explanation': f"Column '{col}' has {non_numeric} non-numeric values"
-                    }
-                    issues.append(issue)
+                expected_type = 'numeric'
+                convertible_ratio = 1.0
+                valid_mask = pd.to_numeric(series, errors='coerce').notna() & series.notna()
+            elif col in self.datetime_cols:
+                expected_type = 'datetime'
+                convertible_ratio = 1.0
+                valid_mask = pd.to_datetime(series, errors='coerce').notna() & series.notna()
+            else:
+                best_type, best_ratio = max(
+                    [('numeric', numeric_ratio), ('datetime', datetime_ratio), ('boolean', boolean_ratio)],
+                    key=lambda x: x[1]
+                )
+                if best_ratio >= 0.6:
+                    expected_type = best_type
+                    convertible_ratio = float(best_ratio)
+                else:
+                    expected_type = 'text'
+                    convertible_ratio = 1.0
+
+                if expected_type == 'numeric':
+                    valid_mask = pd.to_numeric(series, errors='coerce').notna() & series.notna()
+                elif expected_type == 'datetime':
+                    valid_mask = pd.to_datetime(series, errors='coerce').notna() & series.notna()
+                elif expected_type == 'boolean':
+                    valid_mask = series.astype(str).str.strip().str.lower().isin({'true', 'false', 'yes', 'no', 'y', 'n', '1', '0', 't', 'f'}) & series.notna()
+                else:
+                    valid_mask = series.notna()
+
+            invalid_mask = series.notna() & (~valid_mask)
+            invalid_count = int(invalid_mask.sum())
+            if invalid_count > 0:
+                invalid_pct = (invalid_count / max(len(non_null), 1)) * 100
+                severity = IssueSeverity.HIGH if invalid_pct > 20 else IssueSeverity.MEDIUM if invalid_pct > 5 else IssueSeverity.LOW
+                recommendation = (
+                    f"Replace invalid values with NaN/custom, then consider converting to {expected_type}; "
+                    f"impute missing values if needed"
+                )
+
+                issue = {
+                    'column': col,
+                    'type': 'inconsistent_values',
+                    'severity': severity,
+                    'count': invalid_count,
+                    'percentage': invalid_pct,
+                    'unique_count': int(series.nunique(dropna=True)),
+                    'expected_type': expected_type,
+                    'convertible_ratio': convertible_ratio,
+                    'recommendation': recommendation,
+                    'explanation': (
+                        f"Column '{col}' has {invalid_count} value(s) not matching dominant type '{expected_type}' "
+                        f"(convertible ratio: {convertible_ratio * 100:.1f}%)"
+                    )
+                }
+                issues.append(issue)
             
             # Check for categorical columns with too many unique values
             if col in self.categorical_cols:

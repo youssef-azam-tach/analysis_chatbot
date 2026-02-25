@@ -385,6 +385,26 @@ export default function CleaningPage() {
   };
   const fixDuplicates = () =>
     callEndpoint('/cleaning/duplicates', {}, 'Duplicate rows removed');
+  const removeColumn = (column: string) =>
+    callEndpoint('/cleaning/remove-column', { column }, `Column "${column}" removed`);
+  const fixInconsistentValues = (
+    column: string,
+    replacementMode: 'nan' | 'custom' | 'impute' = 'nan',
+    customValue?: string,
+    imputeStrategy: 'mean' | 'median' | 'mode' = 'mean',
+  ) =>
+    callEndpoint(
+      '/cleaning/inconsistent-values',
+      {
+        columns: [column],
+        replacement_mode: replacementMode,
+        custom_value: customValue,
+        impute_strategy: imputeStrategy,
+        cast_if_consistent: true,
+        consistency_threshold: 0.8,
+      },
+      `Inconsistent values in "${column}" handled (${replacementMode})`,
+    );
   const applyNextStepDatasetSelection = async () => {
     if (!sessionId) return toast.error('Upload data first');
     if (nextStepKeys.length === 0) return toast.error('Select at least one dataset');
@@ -686,6 +706,15 @@ export default function CleaningPage() {
                                     <div className="flex items-center gap-2 flex-wrap">
                                       {issue.type === 'missing_values' && issue.column && (
                                         <>
+                                          <Button
+                                            size="sm"
+                                            variant={typeof issue.percentage === 'number' && issue.percentage >= 50 ? 'danger' : 'secondary'}
+                                            loading={loading}
+                                            onClick={async () => { await removeColumn(issue.column); markFixed(issue._id); }}
+                                          >
+                                            Remove Column
+                                          </Button>
+
                                           {['mean', 'median', 'mode', 'drop', 'ffill', 'bfill'].map((s) => {
                                             const suggestion = previewData?.fill_suggestions?.[issue.column];
                                             const suggestedValue =
@@ -730,6 +759,58 @@ export default function CleaningPage() {
                                                   return;
                                                 }
                                                 await fixMissing(issue.column, 'constant', customValue);
+                                                markFixed(issue._id);
+                                              }}
+                                            >
+                                              Apply custom
+                                            </Button>
+                                          </div>
+                                        </>
+                                      )}
+                                      {['inconsistent_values', 'type_mismatch'].includes(issue.type) && issue.column && (
+                                        <>
+                                          <Button
+                                            size="sm"
+                                            variant="primary"
+                                            loading={loading}
+                                            onClick={async () => { await fixInconsistentValues(issue.column, 'nan'); markFixed(issue._id); }}
+                                          >
+                                            Replace invalid → NaN
+                                          </Button>
+                                          <Button
+                                            size="sm"
+                                            variant="secondary"
+                                            loading={loading}
+                                            onClick={async () => { await fixInconsistentValues(issue.column, 'impute', undefined, 'mean'); markFixed(issue._id); }}
+                                          >
+                                            Impute Mean
+                                          </Button>
+                                          <Button
+                                            size="sm"
+                                            variant="secondary"
+                                            loading={loading}
+                                            onClick={async () => { await fixInconsistentValues(issue.column, 'impute', undefined, 'mode'); markFixed(issue._id); }}
+                                          >
+                                            Impute Mode
+                                          </Button>
+                                          <div className="flex items-center gap-2 w-full sm:w-auto">
+                                            <Input
+                                              value={customFillByColumn[issue.column] ?? ''}
+                                              onChange={(v: string) => setCustomFillByColumn((prev) => ({ ...prev, [issue.column]: v }))}
+                                              placeholder="Custom replacement"
+                                              className="min-w-[180px]"
+                                            />
+                                            <Button
+                                              size="sm"
+                                              variant="secondary"
+                                              loading={loading}
+                                              onClick={async () => {
+                                                const customValue = customFillByColumn[issue.column];
+                                                if (customValue == null || customValue === '') {
+                                                  toast.error('Enter custom value first');
+                                                  return;
+                                                }
+                                                await fixInconsistentValues(issue.column, 'custom', customValue, 'mean');
                                                 markFixed(issue._id);
                                               }}
                                             >
@@ -784,7 +865,7 @@ export default function CleaningPage() {
                                           🗑️ Remove{issue.count != null ? ` ${issue.count.toLocaleString()}` : ''} Duplicate{issue.count !== 1 ? 's' : ''}
                                         </Button>
                                       )}
-                                      {['high_cardinality', 'type_mismatch', 'whitespace_inconsistency', 'case_inconsistency', 'high_correlation'].includes(issue.type) && (
+                                      {['high_cardinality', 'whitespace_inconsistency', 'case_inconsistency', 'high_correlation'].includes(issue.type) && (
                                         <span className="text-xs text-[var(--text-muted)] italic">Manual review recommended</span>
                                       )}
                                       <Button size="sm" variant="secondary" onClick={() => markSkipped(issue._id)}
@@ -1125,30 +1206,45 @@ export default function CleaningPage() {
                 </Card>
 
                 <Card>
-                  <h3 className="font-semibold mb-4 flex items-center gap-2"><PenLine className="w-4 h-4 text-emerald-600" /> Create Custom Column</h3>
-                  <div className="grid grid-cols-2 gap-4 mb-4">
-                    <Input label="Column Name" value={colName} onChange={setColName} placeholder="e.g. revenue_per_unit" />
-                    <Input label="Formula (DAX-style)" value={colExpression} onChange={setColExpression} placeholder="e.g. [Price] * [Quantity]" />
-                  </div>
-                  <p className="text-xs text-[var(--text-muted)] mb-3">Use <code className="px-1 py-0.5 rounded bg-[var(--bg-tertiary)]">[ColumnName]</code> to reference columns. Example: <code className="px-1 py-0.5 rounded bg-[var(--bg-tertiary)]">[Price] * [Quantity]</code></p>
-                  {(columnsDatasetColumns.length ?? 0) > 0 && (
-                    <div className="flex flex-wrap gap-1.5 mb-4">
-                      {columnsDatasetColumns.map((col) => (
-                        <button key={col} type="button" onClick={() => setColExpression(prev => prev ? `${prev} [${col}]` : `[${col}]`)}
-                          className="px-2 py-1 text-xs rounded-md bg-[var(--bg-tertiary)] border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--accent)] hover:border-[var(--accent)] transition cursor-pointer">
-                          {col}
-                        </button>
-                      ))}
+                  <h3 className="font-semibold mb-4 flex items-center gap-2"><PenLine className="w-4 h-4 text-emerald-600" /> Create Calculated Column</h3>
+                  <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+                    <div className="xl:col-span-2">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                        <Input label="Column Name" value={colName} onChange={setColName} placeholder="e.g. revenue_per_unit" />
+                        <Input label="Expression (simple formula)" value={colExpression} onChange={setColExpression} placeholder="e.g. [Price] * [Quantity]" />
+                      </div>
+                      <p className="text-xs text-[var(--text-muted)] mb-3">Use <code className="px-1 py-0.5 rounded bg-[var(--bg-tertiary)]">[ColumnName]</code> to reference columns. This supports simple expressions and helper functions, not full DAX context engine.</p>
+                      {(columnsDatasetColumns.length ?? 0) > 0 && (
+                        <div className="flex flex-wrap gap-1.5 mb-4">
+                          {columnsDatasetColumns.map((col) => (
+                            <button key={col} type="button" onClick={() => setColExpression(prev => prev ? `${prev} [${col}]` : `[${col}]`)}
+                              className="px-2 py-1 text-xs rounded-md bg-[var(--bg-tertiary)] border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--accent)] hover:border-[var(--accent)] transition cursor-pointer">
+                              {col}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      <Button loading={loading} icon={<PenLine className="w-4 h-4" />}
+                        onClick={() => {
+                          if (!colName || !colExpression) return toast.error('Fill name and expression');
+                          const pyExpr = colExpression.replace(/\[([^\]]+)\]/g, "df['$1']");
+                          callEndpoint('/cleaning/custom-column', { column_name: colName, expression: pyExpr }, `Column "${colName}" created!`);
+                        }}>
+                        Create Column
+                      </Button>
                     </div>
-                  )}
-                  <Button loading={loading} icon={<PenLine className="w-4 h-4" />}
-                    onClick={() => {
-                      if (!colName || !colExpression) return toast.error('Fill name and expression');
-                      const pyExpr = colExpression.replace(/\[([^\]]+)\]/g, "df['$1']");
-                      callEndpoint('/cleaning/custom-column', { column_name: colName, expression: pyExpr }, `Column "${colName}" created!`);
-                    }}>
-                    Create Column
-                  </Button>
+
+                    <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-secondary)] p-4">
+                      <h4 className="text-sm font-semibold mb-2">Quick Formula Help</h4>
+                      <div className="space-y-1.5 text-xs text-[var(--text-secondary)]">
+                        <p><strong>Math:</strong> <code>[Price] * [Qty]</code>, <code>[A] + 10</code>, <code>round([Amount], 2)</code></p>
+                        <p><strong>Condition:</strong> <code>IF([Amount] &gt; 1000, 'High', 'Low')</code></p>
+                        <p><strong>Date:</strong> <code>YEAR([OrderDate])</code>, <code>MONTH([OrderDate])</code>, <code>DAY([OrderDate])</code>, <code>WEEKDAY([OrderDate])</code></p>
+                        <p><strong>Aggregation:</strong> <code>SUM([Sales])</code>, <code>AVG([Sales])</code>, <code>MEDIAN([Sales])</code>, <code>MIN([Sales])</code>, <code>MAX([Sales])</code>, <code>COUNT([Sales])</code>, <code>NUNIQUE([CustomerID])</code></p>
+                        <p><strong>Null handling:</strong> <code>COALESCE([Discount], 0)</code></p>
+                      </div>
+                    </div>
+                  </div>
                 </Card>
 
                 <Card>

@@ -39,9 +39,18 @@ class DashboardBuilder:
         pinned_items = []
         
         for graph in response.get("graphs", []):
+            plotly_json = graph.get("plotly_json")
+            if not plotly_json:
+                figure_obj = graph.get("figure")
+                if hasattr(figure_obj, "to_json"):
+                    try:
+                        plotly_json = figure_obj.to_json()
+                    except Exception:
+                        plotly_json = None
+
             pinned_items.append({
                 "title": graph["title"],
-                "figure": graph["figure"],
+                "plotly_json": plotly_json,
                 "type": "chart"
             })
             
