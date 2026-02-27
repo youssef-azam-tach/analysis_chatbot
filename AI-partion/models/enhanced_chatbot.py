@@ -15,6 +15,11 @@ import json
 
 from models.data_to_text import DataToText
 from analysis.visualization import Visualizer
+from analysis.viz_rules import (
+    classify_columns, is_id_column, validate_chart_spec,
+    format_chart_title, get_viz_rules_for_prompt,
+    get_column_classification_for_prompt,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -93,9 +98,8 @@ Missing Values: {self.df.isna().sum().sum()}
 Duplicate Rows: {self.df.duplicated().sum()}
 Completeness: {(self.df.notna().sum().sum() / (len(self.df) * len(self.df.columns)) * 100):.1f}%
 
-=== AVAILABLE COLUMNS FOR VISUALIZATION ===
-Numeric: {', '.join(self.df.select_dtypes(include=[np.number]).columns.tolist())}
-Categorical: {', '.join(self.df.select_dtypes(include=['object', 'category']).columns.tolist()[:10])}
+=== COLUMN CLASSIFICATION FOR VISUALIZATION ===
+{get_column_classification_for_prompt(self.df, 'main_dataset')}
 """
             
             logger.info("✅ Enhanced data context loaded for chatbot")
@@ -264,110 +268,198 @@ Answer the user's question based on the dataset provided above.
         
         return graphs
     
+    def _get_measures(self) -> List[str]:
+        """Get measure columns (no IDs)"""
+        return classify_columns(self.df)['measures']
+    
+    def _get_dimensions(self) -> List[str]:
+        """Get dimension columns (no IDs)"""
+        return classify_columns(self.df)['dimensions']
+    
+    def _get_dates(self) -> List[str]:
+        """Get date columns"""
+        return classify_columns(self.df)['dates']
+
     def _create_ranking_charts(self, question: str) -> List[Dict]:
-        """Create ranking/top-N charts"""
+        """Create ranking/top-N charts using only meaningful columns"""
         graphs = []
         
-        # Find categorical and numeric columns
-        categorical_cols = self.df.select_dtypes(include=['object', 'category']).columns
-        numeric_cols = self.df.select_dtypes(include=[np.number]).columns
+        categorical_cols = self._get_dimensions()
+        numeric_cols = self._get_measures()
         
-        # Try to create top-N chart for first categorical column
         if len(categorical_cols) > 0 and len(numeric_cols) > 0:
+            # Try to detect columns from question
             cat_col = categorical_cols[0]
             num_col = numeric_cols[0]
+            for col in categorical_cols:
+                if col.lower() in question.lower():
+                    cat_col = col
+                    break
+            for col in numeric_cols:
+                if col.lower() in question.lower():
+                    num_col = col
+                    break
             
-            # Aggregate and get top 10
+            # Validate chart spec
+            valid, reason = validate_chart_spec(self.df, 'bar', cat_col, num_col)
+            if not valid:
+                logger.warning(f"Ranking chart blocked: {reason}")
+                return graphs
+            
             top_data = self.df.groupby(cat_col)[num_col].sum().nlargest(10)
             
             if not top_data.empty:
+                title = format_chart_title('bar', cat_col, num_col, 'SUM')
                 fig = px.bar(
                     x=self._sanitize_for_json(top_data.values),
                     y=self._sanitize_for_json(top_data.index),
                     orientation='h',
-                    title=f"Top 10 {cat_col} by {num_col}",
-                    labels={'x': str(num_col), 'y': str(cat_col)}
+                    title=f"Top 10 — {title}",
+                    labels={'x': f'SUM of {num_col}', 'y': str(cat_col)}
                 )
                 
                 graphs.append({
                     "type": "ranking_bar",
-                    "title": f"Top 10 {cat_col}",
+                    "title": f"Top 10 — {title}",
                     "figure": fig
                 })
         
         return graphs
     
     def _create_comparison_charts(self, question: str) -> List[Dict]:
-        """Create comparison charts"""
+        """Create comparison charts using meaningful columns only"""
         graphs = []
         
-        numeric_cols = self.df.select_dtypes(include=[np.number]).columns[:3]
+        categorical_cols = self._get_dimensions()
+        numeric_cols = self._get_measures()
         
-        if len(numeric_cols) >= 2:
-            # Create grouped bar chart
+        # Prefer grouped comparison with categories
+        if len(categorical_cols) > 0 and len(numeric_cols) >= 1:
+            cat_col = categorical_cols[0]
+            num_col = numeric_cols[0]
+            
+            valid, reason = validate_chart_spec(self.df, 'bar', cat_col, num_col)
+            if not valid:
+                return graphs
+            
+            top_cats = self.df[cat_col].value_counts().head(8).index
+            df_filtered = self.df[self.df[cat_col].isin(top_cats)]
+            
+            if len(df_filtered) > 0:
+                agg_data = df_filtered.groupby(cat_col)[num_col].agg(['sum', 'mean']).reset_index()
+                fig = go.Figure()
+                fig.add_trace(go.Bar(
+                    name=f'SUM of {num_col}',
+                    x=self._sanitize_for_json(agg_data[cat_col]),
+                    y=self._sanitize_for_json(agg_data['sum']),
+                    marker_color='lightblue'
+                ))
+                fig.add_trace(go.Bar(
+                    name=f'AVG of {num_col}',
+                    x=self._sanitize_for_json(agg_data[cat_col]),
+                    y=self._sanitize_for_json(agg_data['mean']),
+                    marker_color='darkblue'
+                ))
+                
+                fig.update_layout(
+                    title=f"Comparison: SUM vs AVG of {num_col} by {cat_col}",
+                    barmode='group',
+                    height=450,
+                    xaxis_tickangle=-45
+                )
+                
+                graphs.append({
+                    "type": "comparison_bar",
+                    "title": f"Comparison of {num_col} by {cat_col}",
+                    "figure": fig
+                })
+        
+        elif len(numeric_cols) >= 2:
             fig = go.Figure()
-            for col in numeric_cols:
+            for col in numeric_cols[:4]:
                 fig.add_trace(go.Bar(
                     name=str(col),
-                    x=[str(col)],
-                    y=[float(self.df[col].mean())]
+                    x=['AVG', 'MEDIAN', 'MAX'],
+                    y=[
+                        float(self.df[col].mean()),
+                        float(self.df[col].median()),
+                        float(self.df[col].max())
+                    ]
                 ))
             
             fig.update_layout(
-                title="Comparison of Numeric Columns",
-                barmode='group'
+                title="Statistical Comparison of Measures",
+                barmode='group',
+                height=450
             )
             
             graphs.append({
-                "type": "comparison_bar",
-                "title": "Column Comparison",
+                "type": "comparison_stats",
+                "title": "Measures Statistical Comparison",
                 "figure": fig
             })
         
         return graphs
     
     def _create_trend_charts(self) -> List[Dict]:
-        """Create trend/time-series charts"""
+        """Create trend/time-series charts — ONLY with date columns on X-axis"""
         graphs = []
         
-        # Look for datetime columns
-        datetime_cols = self.df.select_dtypes(include=['datetime64']).columns
-        numeric_cols = self.df.select_dtypes(include=[np.number]).columns
+        date_cols = self._get_dates()
+        numeric_cols = self._get_measures()
         
-        if len(datetime_cols) > 0 and len(numeric_cols) > 0:
-            date_col = datetime_cols[0]
+        # Also check datetime dtype columns
+        if not date_cols:
+            datetime_typed = self.df.select_dtypes(include=['datetime64']).columns.tolist()
+            for col in datetime_typed:
+                if not is_id_column(self.df[col], col):
+                    date_cols.append(col)
+        
+        if len(date_cols) > 0 and len(numeric_cols) > 0:
+            date_col = date_cols[0]
             num_col = numeric_cols[0]
             
-            # Sort by date and create line chart
+            # Validate: line chart MUST have time on X-axis
+            valid, reason = validate_chart_spec(self.df, 'line', date_col, num_col)
+            if not valid:
+                logger.warning(f"Trend chart blocked: {reason}")
+                return graphs
+            
             df_sorted = self.df.sort_values(date_col).copy()
-            # Convert to native Python types
-            df_sorted[date_col] = pd.to_datetime(df_sorted[date_col])
+            df_sorted[date_col] = pd.to_datetime(df_sorted[date_col], errors='coerce')
+            df_sorted = df_sorted.dropna(subset=[date_col])
             df_sorted[num_col] = df_sorted[num_col].astype(float)
             
+            title = f"SUM of {num_col} Trend Over {date_col}"
             fig = px.line(
                 df_sorted,
                 x=date_col,
                 y=num_col,
-                title=f"Trend of {num_col} over time",
+                title=title,
                 markers=True
             )
             
             graphs.append({
                 "type": "trend_line",
-                "title": f"{num_col} Trend",
+                "title": title,
                 "figure": fig
             })
+        else:
+            logger.info("No date columns found — cannot create trend chart (line charts require time data)")
         
         return graphs
     
     def _create_distribution_charts(self, question: str) -> List[Dict]:
-        """Create distribution charts"""
+        """Create distribution charts using only measure columns"""
         graphs = []
         
-        numeric_cols = self.df.select_dtypes(include=[np.number]).columns[:2]
+        numeric_cols = self._get_measures()[:2]
         
         for col in numeric_cols:
-            # Histogram - create a clean copy with native types
+            valid, reason = validate_chart_spec(self.df, 'histogram', col, None)
+            if not valid:
+                continue
+            
             df_clean = self.df[[col]].copy()
             df_clean[col] = df_clean[col].astype(float)
             
@@ -381,20 +473,19 @@ Answer the user's question based on the dataset provided above.
             
             graphs.append({
                 "type": "histogram",
-                "title": f"{col} Distribution",
+                "title": f"Distribution of {col}",
                 "figure": fig
             })
         
         return graphs
     
     def _create_correlation_charts(self) -> List[Dict]:
-        """Create correlation charts"""
+        """Create correlation charts using only measure columns (no IDs)"""
         graphs = []
         
-        numeric_cols = self.df.select_dtypes(include=[np.number]).columns
+        numeric_cols = self._get_measures()
         
         if len(numeric_cols) >= 2:
-            # Correlation heatmap
             corr_matrix = self.df[numeric_cols].corr()
             
             fig = go.Figure(data=go.Heatmap(
@@ -405,7 +496,7 @@ Answer the user's question based on the dataset provided above.
                 zmid=0
             ))
             
-            fig.update_layout(title="Correlation Matrix")
+            fig.update_layout(title="Correlation Matrix (Measures Only)")
             
             graphs.append({
                 "type": "correlation_heatmap",
@@ -413,9 +504,9 @@ Answer the user's question based on the dataset provided above.
                 "figure": fig
             })
             
-            # Scatter plot for top 2 numeric columns
-            if len(numeric_cols) >= 2:
-                # Create clean dataframe with native types
+            # Scatter plot for first 2 measure columns
+            valid, reason = validate_chart_spec(self.df, 'scatter', numeric_cols[0], numeric_cols[1])
+            if valid:
                 df_scatter = self.df[[numeric_cols[0], numeric_cols[1]]].copy()
                 df_scatter[numeric_cols[0]] = df_scatter[numeric_cols[0]].astype(float)
                 df_scatter[numeric_cols[1]] = df_scatter[numeric_cols[1]].astype(float)
@@ -430,7 +521,7 @@ Answer the user's question based on the dataset provided above.
                 
                 graphs.append({
                     "type": "scatter",
-                    "title": "Relationship Plot",
+                    "title": f"{numeric_cols[0]} vs {numeric_cols[1]}",
                     "figure": fig
                 })
         

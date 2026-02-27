@@ -9,6 +9,7 @@ import {
   Merge, PenLine, RotateCcw, Download, Wand2, Database, ShieldCheck,
   SkipForward, Layers, ArrowRight, ArrowLeft, Eye, Table2, ChevronRight
 } from 'lucide-react';
+import DatasetSelector from '@/components/DatasetSelector';
 import toast from 'react-hot-toast';
 
 /* ── Types ───────────────────────────────────────────────── */
@@ -557,21 +558,16 @@ export default function CleaningPage() {
           {/* ── Dataset Selector Bar ── */}
           {dsKeys.length > 0 && (
             <Card className="mb-4">
-              <div className="flex items-center gap-3 flex-wrap">
+              <div className="flex items-center gap-3">
                 <span className="text-sm font-medium text-[var(--text-secondary)] shrink-0">
                   <Database className="w-4 h-4 inline mr-1" />Active Dataset:
                 </span>
-                {dsKeys.map((key) => (
-                  <button key={key} onClick={() => { switchActiveDataset(key); }}
-                    className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition cursor-pointer ${
-                      activeDatasetKey === key
-                        ? 'bg-[var(--accent)] text-white shadow-sm'
-                        : 'bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] border border-[var(--border)]'
-                    }`}>
-                    <Table2 className="w-3 h-3" />
-                    <span className="max-w-[200px] truncate">{key.replace('::', ' → ')}</span>
-                  </button>
-                ))}
+                <DatasetSelector
+                  datasets={dsKeys}
+                  activeDataset={activeDatasetKey}
+                  onSelect={(key) => switchActiveDataset(key)}
+                  className="flex-1"
+                />
               </div>
             </Card>
           )}
@@ -604,24 +600,20 @@ export default function CleaningPage() {
                 {!qualityLoading && Object.keys(qualityResults).length > 0 && (
                   <>
                     {dsKeys.length > 1 && (
-                      <div className="flex gap-2 flex-wrap">
-                        {dsKeys.map((key) => {
+                      <DatasetSelector
+                        datasets={dsKeys}
+                        activeDataset={activeDatasetKey}
+                        onSelect={(key) => { switchActiveDataset(key); setFixedIssues(new Set()); setSkippedIssues(new Set()); }}
+                        renderBadge={(key) => {
                           const ds = qualityResults[key];
                           if (!ds) return null;
                           return (
-                            <button key={key} onClick={() => { switchActiveDataset(key); setFixedIssues(new Set()); setSkippedIssues(new Set()); }}
-                              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition cursor-pointer ${
-                                activeDatasetKey === key ? 'bg-[var(--accent)] text-white' : 'bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-                              }`}>
-                              <Database className="w-3.5 h-3.5" />
-                              <span className="max-w-[200px] truncate">{key.replace('::', ' → ')}</span>
-                              <span className={`text-xs font-bold ${ds.quality_score >= 80 ? 'text-emerald-600' : ds.quality_score >= 60 ? 'text-amber-600' : 'text-red-600'}`}>
-                                {Math.round(ds.quality_score)}
-                              </span>
-                            </button>
+                            <span className={`text-xs font-bold ${ds.quality_score >= 80 ? 'text-emerald-600' : ds.quality_score >= 60 ? 'text-amber-600' : 'text-red-600'}`}>
+                              {Math.round(ds.quality_score)}
+                            </span>
                           );
-                        })}
-                      </div>
+                        }}
+                      />
                     )}
 
                     {activeQuality && (

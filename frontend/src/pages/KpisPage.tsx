@@ -3,8 +3,9 @@ import { useWorkspaceStore } from '@/stores/workspace-store';
 import { useAuthStore } from '@/stores/auth-store';
 import { engine } from '@/lib/api';
 import { loadPageState, savePageState } from '@/lib/pagePersistence';
-import { Button, Card, Badge, Spinner, EmptyState, Input, Select, KpiCard, Tabs } from '@/components/ui';
+import { Button, Card, Badge, Spinner, EmptyState, Input, Select, KpiCard } from '@/components/ui';
 import { TrendingUp, Plus, Wand2, CheckCircle2, AlertTriangle, Database, BarChart3, Key, Hash, FolderOpen, ChevronDown, ChevronUp, Pin } from 'lucide-react';
+import DatasetSelector from '@/components/DatasetSelector';
 import toast from 'react-hot-toast';
 
 interface KPI {
@@ -355,17 +356,24 @@ export default function KpisPage() {
               <h2 className="text-lg font-bold mb-4 flex items-center gap-2">
                 <FolderOpen className="w-5 h-5 text-blue-600" /> KPIs by Dataset
               </h2>
-              <Tabs
-                tabs={[
-                  { key: '__all__', label: 'All Datasets', icon: <FolderOpen className="w-3.5 h-3.5" /> },
-                  ...Object.keys(result.datasets).map(k => ({
-                    key: k,
-                  label: shortName(k),
-                  icon: <Database className="w-3.5 h-3.5" />,
-                }))]}
-                active={activeDatasetTab}
-                onChange={setActiveDatasetTab}
-              />
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => setActiveDatasetTab('__all__')}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition cursor-pointer ${
+                    activeDatasetTab === '__all__'
+                      ? 'bg-[var(--accent)] text-white shadow-sm'
+                      : 'bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] border border-[var(--border)]'
+                  }`}
+                >
+                  <FolderOpen className="w-3.5 h-3.5" /> All Datasets
+                </button>
+                <DatasetSelector
+                  datasets={Object.keys(result.datasets)}
+                  activeDataset={activeDatasetTab === '__all__' ? '' : activeDatasetTab}
+                  onSelect={setActiveDatasetTab}
+                  className="flex-1"
+                />
+              </div>
 
               {/* All Datasets view */}
               {activeDatasetTab === '__all__' && (

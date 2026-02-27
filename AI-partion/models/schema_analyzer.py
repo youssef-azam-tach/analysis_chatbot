@@ -4,12 +4,15 @@ Automatically understands dataset schema and detects relationships between files
 Enhanced with data-based relationship detection similar to ERD
 """
 
+import math
+
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Any, Set
 import logging
 import ollama
 import re
+from collections import Counter
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,6 +40,18 @@ class SchemaAnalyzer:
         self.rejected_relationships: List[Dict[str, Any]] = []
         self.suspicious_columns: List[Dict[str, Any]] = []
 
+    # ── Performance: max rows used for value-set / overlap computations ──
+    _SAMPLE_LIMIT = 20_000
+
+    # ── Profiling engine weights & threshold ──
+    _W_CARDINALITY  = 0.25
+    _W_UNIQUENESS   = 0.25
+    _W_SEQUENTIAL   = 0.15
+    _W_AGGREGATION  = 0.10
+    _W_DISTRIBUTION = 0.10
+    _W_NAME_PRIOR   = 0.15
+    _ID_THRESHOLD   = 55   # total_score >= this → is_id_likely
+
     _TEMPORAL_AUDIT_FIELDS = {
         "date", "startdate", "enddate", "duedate", "modifieddate",
         "createddate", "updateddate", "created_at", "updated_at",
@@ -59,7 +74,7 @@ class SchemaAnalyzer:
         logger.info(f"Added dataset: {name} with {len(df)} rows and {len(df.columns)} columns")
     
     def _extract_schema(self, name: str, df: pd.DataFrame) -> Dict:
-        """Extract detailed schema information from dataframe"""
+        """Extract detailed schema information from dataframe, including ID profiling."""
         schema = {
             "name": name,
             "rows": len(df),
@@ -88,6 +103,9 @@ class SchemaAnalyzer:
             else:
                 col_info["type"] = "categorical"
                 col_info["unique_ratio"] = df[col].nunique() / len(df) if len(df) > 0 else 0
+            
+            # Attach ID profiling signals
+            col_info["id_profile"] = self._profile_column_id(df[col], col)
             
             schema["column_details"].append(col_info)
         
@@ -244,23 +262,217 @@ class SchemaAnalyzer:
             or pd.api.types.is_categorical_dtype(series)
         )
 
-    def _value_set(self, series: pd.Series) -> Set[str]:
+    def _value_set(self, series: pd.Series, limit: Optional[int] = None) -> Set[str]:
+        """Build a set of string-cast non-null values with optional sampling.
+
+        When *limit* is None the class-level ``_SAMPLE_LIMIT`` is used.
+        Pass ``limit=0`` to disable sampling and use all rows.
+        """
         if series is None:
             return set()
+        non_null = series.dropna()
+        cap = limit if limit is not None else self._SAMPLE_LIMIT
+        if cap and len(non_null) > cap:
+            non_null = non_null.sample(n=cap, random_state=42)
         return {
             str(v).strip()
-            for v in series.dropna().astype(str)
+            for v in non_null.astype(str)
             if str(v).strip() != ""
         }
 
-    def _detect_primary_keys(self) -> Dict[str, List[str]]:
-        pk_map: Dict[str, List[str]] = {}
+    # ═══════════════════════════════════════════════════════════
+    #  DATA PROFILING – ID / KEY CONFIDENCE ENGINE
+    # ═══════════════════════════════════════════════════════════
+    # Each sub-scorer returns 0-100. The weighted total decides
+    # whether a column is likely an identifier (threshold >= _ID_THRESHOLD).
+
+    @staticmethod
+    def _prof_cardinality_ratio(series: pd.Series) -> float:
+        """nunique(non-null) / count(non-null), range 0.0–1.0."""
+        non_null = series.dropna()
+        if len(non_null) == 0:
+            return 0.0
+        return non_null.nunique() / len(non_null)
+
+    @staticmethod
+    def _prof_uniqueness_score(cardinality: float) -> float:
+        """Map cardinality ratio → 0-100 score."""
+        if cardinality >= 0.99:
+            return 100
+        if cardinality >= 0.95:
+            return 90
+        if cardinality >= 0.90:
+            return 75
+        if cardinality >= 0.75:
+            return 40
+        if cardinality >= 0.50:
+            return 15
+        return 0
+
+    @staticmethod
+    def _prof_sequential_score(series: pd.Series) -> float:
+        """Detect auto-increment patterns (diff==1 ratio), 0-100."""
+        if not pd.api.types.is_numeric_dtype(series):
+            return 0
+        non_null = series.dropna()
+        if len(non_null) < 10:
+            return 0
+        sorted_vals = np.sort(non_null.values)
+        diffs = np.diff(sorted_vals)
+        if len(diffs) == 0:
+            return 0
+        return float(np.mean(diffs == 1)) * 100
+
+    @staticmethod
+    def _prof_aggregation_score(series: pd.Series) -> float:
+        """High CV (std/mean) → meaningless aggregation → likely ID.  0-100."""
+        if not pd.api.types.is_numeric_dtype(series):
+            return 0
+        non_null = series.dropna()
+        if len(non_null) < 10:
+            return 0
+        mean = float(non_null.mean())
+        if mean == 0:
+            return 0
+        cv = float(non_null.std()) / abs(mean)
+        if cv > 1.5:
+            return 80
+        if cv > 1.0:
+            return 60
+        if cv > 0.5:
+            return 30
+        return 0
+
+    @staticmethod
+    def _prof_distribution_score(series: pd.Series) -> float:
+        """Low skewness → uniform-like → ID.  Uses manual skewness (no scipy).  0-100."""
+        if not pd.api.types.is_numeric_dtype(series):
+            return 0
+        non_null = series.dropna()
+        if len(non_null) < 10:
+            return 0
+        # Manual Pearson skewness: E[((x-mu)/σ)^3]
+        mean = float(non_null.mean())
+        std = float(non_null.std())
+        if std == 0:
+            return 0
+        skewness = abs(float(((non_null - mean) / std).pow(3).mean()))
+        if skewness < 0.3:
+            return 70
+        if skewness < 0.7:
+            return 40
+        return 0
+
+    @staticmethod
+    def _prof_entropy_score(series: pd.Series) -> float:
+        """High character-level entropy → random IDs / UUIDs.  0-100."""
+        non_null = series.dropna().astype(str)
+        if len(non_null) < 10:
+            return 0
+        sample_str = ''.join(non_null.head(200))
+        if not sample_str:
+            return 0
+        freq = Counter(sample_str)
+        total = len(sample_str)
+        probs = [v / total for v in freq.values()]
+        entropy = -sum(p * math.log2(p) for p in probs)
+        if entropy > 4:
+            return 80
+        if entropy > 3:
+            return 50
+        return 0
+
+    def _prof_name_prior(self, col_name: str) -> float:
+        """Name-only prior: 0-100 (100 = definitely ID by name, 0 = no signal)."""
+        name = str(col_name).lower().strip().replace(" ", "")
+        # Exact ID names
+        if name in {"id", "uuid", "guid", "rowid", "row_id", "index", "pk", "fk"}:
+            return 100
+        # Suffix patterns
+        for suffix in ("_id", "id", "_key", "key", "_pk", "_fk",
+                        "_guid", "_uuid", "_code", "code",
+                        "_number", "number", "_no", "no"):
+            if name.endswith(suffix) and len(name) > len(suffix):
+                return 95
+        # CamelCase ending in ID (BusinessEntityID)
+        if re.search(r'[a-z]ID$', str(col_name)):
+            return 95
+        # Token check
+        tokens = {t for t in re.split(r'[^a-z0-9]+', name) if t}
+        if tokens & {"id", "key", "pk", "fk", "uuid", "guid", "rowguid", "hash", "token"}:
+            return 90
+        return 0
+
+    def _profile_column_id(self, series: pd.Series, col_name: str) -> Dict[str, Any]:
+        """Run the full ID profiling engine on a single column.
+
+        Returns a dict with sub-scores, total_score (0-100), and is_id_likely bool.
+        """
+        cardinality = self._prof_cardinality_ratio(series)
+        name_prior  = self._prof_name_prior(col_name)
+
+        # Float columns are almost never IDs – penalty
+        is_float = pd.api.types.is_float_dtype(series)
+        card_raw = cardinality * 100
+        uniq_raw = self._prof_uniqueness_score(cardinality)
+        if is_float:
+            card_raw *= 0.25
+            uniq_raw *= 0.25
+
+        seq  = self._prof_sequential_score(series) if not is_float else 0
+        agg  = self._prof_aggregation_score(series)
+        dist = self._prof_distribution_score(series)
+
+        total = (
+            card_raw    * self._W_CARDINALITY  +
+            uniq_raw    * self._W_UNIQUENESS   +
+            seq         * self._W_SEQUENTIAL   +
+            agg         * self._W_AGGREGATION  +
+            dist        * self._W_DISTRIBUTION +
+            name_prior  * self._W_NAME_PRIOR
+        )
+
+        # Name-prior dominates when it is very high (explicit "ID" suffix)
+        if name_prior >= 90:
+            total = max(total, name_prior)
+
+        profile = {
+            "cardinality":       round(card_raw, 2),
+            "uniqueness_score":  round(uniq_raw, 2),
+            "sequential_score":  round(seq, 2),
+            "aggregation_score": round(agg, 2),
+            "distribution_score": round(dist, 2),
+            "name_prior":        round(name_prior, 2),
+            "total_score":       round(total, 2),
+            "is_id_likely":      total >= self._ID_THRESHOLD,
+        }
+        return profile
+
+    def _detect_primary_keys(self) -> Dict[str, Dict[str, List[str]]]:
+        """Detect primary key candidates for each table.
+
+        Returns ``{table: {"strict": [...], "probable": [...]}}``.
+
+        * **strict**: 100% non-null, 100% unique, deterministic dtype,
+          not disallowed (temporal/measure/descriptive).
+        * **probable**: high ID confidence (total_score >= _ID_THRESHOLD),
+          cardinality >= 0.97, null_rate <= 2%.  These are plausible PKs
+          that may have minor data-quality issues.
+        """
+        pk_map: Dict[str, Dict[str, List[str]]] = {}
         for table_name, df in self.datasets.items():
-            candidates: List[str] = []
+            strict: List[str] = []
+            probable: List[Tuple[str, float]] = []  # (col, total_score)
             total_rows = len(df)
             if total_rows == 0:
-                pk_map[table_name] = []
+                pk_map[table_name] = {"strict": [], "probable": []}
                 continue
+
+            # Build a fast lookup for id_profiles from schema
+            schema = self.schemas.get(table_name, {})
+            id_profiles: Dict[str, Dict] = {}
+            for cd in schema.get("column_details", []):
+                id_profiles[cd["name"]] = cd.get("id_profile", {})
 
             for col in df.columns:
                 col_series = df[col]
@@ -270,17 +482,39 @@ class SchemaAnalyzer:
 
                 if self._is_disallowed_for_key(col, dtype):
                     continue
-
                 if not self._is_stable_deterministic_dtype(col_series):
                     continue
 
-                is_unique = unique_non_null == non_null
+                is_unique = unique_non_null == non_null and non_null > 0
                 is_non_null = non_null == total_rows
-                if is_unique and is_non_null:
-                    candidates.append(col)
 
-            candidates.sort(key=lambda c: (len(c), c.lower()))
-            pk_map[table_name] = candidates
+                if is_unique and is_non_null:
+                    strict.append(col)
+                else:
+                    # Check probable PK: high ID score + near-perfect cardinality + low nulls
+                    profile = id_profiles.get(col, {})
+                    total_score = profile.get("total_score", 0)
+                    if total_rows > 0:
+                        null_rate = (total_rows - non_null) / total_rows
+                        cardinality = unique_non_null / non_null if non_null > 0 else 0
+                    else:
+                        null_rate = 1.0
+                        cardinality = 0
+
+                    if (
+                        total_score >= self._ID_THRESHOLD
+                        and cardinality >= 0.97
+                        and null_rate <= 0.02
+                    ):
+                        probable.append((col, total_score))
+
+            strict.sort(key=lambda c: (len(c), c.lower()))
+            # Sort probable by total_score descending, then name
+            probable.sort(key=lambda t: (-t[1], len(t[0]), t[0].lower()))
+            pk_map[table_name] = {
+                "strict": strict,
+                "probable": [p[0] for p in probable],
+            }
 
         return pk_map
     
@@ -354,8 +588,41 @@ class SchemaAnalyzer:
         self.data_overlaps = overlaps
         return overlaps
     
+    def _get_column_id_profile(self, table_name: str, col_name: str) -> Dict[str, Any]:
+        """Retrieve the id_profile from pre-computed schema, or compute on the fly."""
+        schema = self.schemas.get(table_name, {})
+        for cd in schema.get("column_details", []):
+            if cd["name"] == col_name:
+                return cd.get("id_profile", {})
+        # Fallback: compute if schema missing
+        df = self.datasets.get(table_name)
+        if df is not None and col_name in df.columns:
+            return self._profile_column_id(df[col_name], col_name)
+        return {}
+
+    def _is_fk_candidate(self, table_name: str, col_name: str, dtype: str, series: pd.Series) -> bool:
+        """Filter: only evaluate child columns that look like FK candidates.
+
+        Criteria:
+        - Not disallowed (temporal / measure / descriptive)
+        - Stable deterministic dtype
+        - id_profile total_score >= 45  (lower than PK threshold; we want to
+          catch FKs that are clearly key-like but not necessarily unique)
+        """
+        if self._is_disallowed_for_key(col_name, dtype):
+            return False
+        if not self._is_stable_deterministic_dtype(series):
+            return False
+        profile = self._get_column_id_profile(table_name, col_name)
+        return profile.get("total_score", 0) >= 45
+
     def analyze_relationships(self) -> List[Dict]:
-        """Strict relational modeling analysis using PK/FK integrity rules."""
+        """Strict relational modeling analysis using PK/FK integrity rules.
+
+        Uses the new strict/probable PK map and data-profiling FK candidate
+        filtering.  Confirmed relationships require strict PK on parent side.
+        Suspicious relationships may consider probable PKs on parent side.
+        """
         if len(self.datasets) < 2:
             logger.warning("Need at least 2 datasets to analyze relationships")
             self.relationships = []
@@ -363,7 +630,9 @@ class SchemaAnalyzer:
             self.rejected_relationships = []
             self.suspicious_columns = []
             return []
+
         pk_map = self._detect_primary_keys()
+
         confirmed: List[Dict[str, Any]] = []
         rejected: List[Dict[str, Any]] = []
         suspicious: List[Dict[str, Any]] = []
@@ -371,15 +640,31 @@ class SchemaAnalyzer:
         seen_rejected: Set[Tuple[str, str, str, str, str]] = set()
         seen_suspicious: Set[Tuple[str, str, str]] = set()
 
+        # Helper to build rejection entry
+        def _reject(child_t, child_c, parent_t, parent_pk, child_vals, parent_vals, fk_cov, pk_cov, olap, reason):
+            r_key = (child_t, child_c, parent_t, parent_pk, reason)
+            if r_key not in seen_rejected:
+                rejected.append({
+                    "file1": child_t, "file2": parent_t,
+                    "column1": child_c, "column2": parent_pk,
+                    "overlap_count": olap,
+                    "child_distinct": len(child_vals),
+                    "parent_distinct": len(parent_vals),
+                    "child_to_parent_coverage": round(fk_cov * 100, 2),
+                    "parent_coverage": round(pk_cov * 100, 2),
+                    "reason": reason,
+                })
+                seen_rejected.add(r_key)
+
+        # ── Phase 1: Confirmed relationships (parent key MUST be strict PK) ──
         for parent_table, parent_df in self.datasets.items():
-            parent_pk_cols = pk_map.get(parent_table, [])
-            if not parent_pk_cols:
+            strict_pks = pk_map.get(parent_table, {}).get("strict", [])
+            if not strict_pks:
                 continue
 
-            for parent_pk in parent_pk_cols:
-                parent_dtype = str(parent_df[parent_pk].dtype)
+            for parent_pk in strict_pks:
                 parent_values = self._value_set(parent_df[parent_pk])
-                if len(parent_values) == 0:
+                if not parent_values:
                     continue
 
                 for child_table, child_df in self.datasets.items():
@@ -389,14 +674,12 @@ class SchemaAnalyzer:
                     for child_col in child_df.columns:
                         child_dtype = str(child_df[child_col].dtype)
 
-                        if self._is_disallowed_for_key(child_col, child_dtype):
-                            continue
-
-                        if not self._is_stable_deterministic_dtype(child_df[child_col]):
+                        # FK candidate filtering via id_profile
+                        if not self._is_fk_candidate(child_table, child_col, child_dtype, child_df[child_col]):
                             continue
 
                         child_values = self._value_set(child_df[child_col])
-                        if len(child_values) == 0:
+                        if not child_values:
                             continue
 
                         intersection = child_values & parent_values
@@ -415,114 +698,48 @@ class SchemaAnalyzer:
                         parent_identifier_like = self._is_identifier_like(parent_pk)
 
                         if not child_identifier_like or not parent_identifier_like:
-                            reason = "Rejected as SQL FK: child/parent columns are not identifier-like keys (attribute-to-attribute mapping)."
-                            r_key = (child_table, child_col, parent_table, parent_pk, reason)
-                            if r_key not in seen_rejected:
-                                rejected.append({
-                                    "file1": child_table,
-                                    "file2": parent_table,
-                                    "column1": child_col,
-                                    "column2": parent_pk,
-                                    "overlap_count": overlap,
-                                    "child_distinct": len(child_values),
-                                    "parent_distinct": len(parent_values),
-                                    "child_to_parent_coverage": round(fk_coverage * 100, 2),
-                                    "parent_coverage": round(pk_coverage * 100, 2),
-                                    "reason": reason,
-                                })
-                                seen_rejected.add(r_key)
+                            _reject(child_table, child_col, parent_table, parent_pk,
+                                    child_values, parent_values, fk_coverage, pk_coverage, overlap,
+                                    "Rejected as SQL FK: child/parent columns are not identifier-like keys (attribute-to-attribute mapping).")
                             continue
 
                         if semantic_alignment == 0:
-                            reason = "Rejected ID-to-ID relation across semantically unrelated entities (no entity alignment evidence)."
-                            r_key = (child_table, child_col, parent_table, parent_pk, reason)
-                            if r_key not in seen_rejected:
-                                rejected.append({
-                                    "file1": child_table,
-                                    "file2": parent_table,
-                                    "column1": child_col,
-                                    "column2": parent_pk,
-                                    "overlap_count": overlap,
-                                    "child_distinct": len(child_values),
-                                    "parent_distinct": len(parent_values),
-                                    "child_to_parent_coverage": round(fk_coverage * 100, 2),
-                                    "parent_coverage": round(pk_coverage * 100, 2),
-                                    "reason": reason,
-                                })
-                                seen_rejected.add(r_key)
+                            _reject(child_table, child_col, parent_table, parent_pk,
+                                    child_values, parent_values, fk_coverage, pk_coverage, overlap,
+                                    "Rejected ID-to-ID relation across semantically unrelated entities (no entity alignment evidence).")
                             continue
 
                         if not self._identifier_entity_compatible(child_table, child_col, parent_table, parent_pk):
-                            reason = "Rejected ID-to-ID relation: identifier entity core mismatch (e.g., ShoppingCartItemID cannot reference TerritoryID)."
-                            r_key = (child_table, child_col, parent_table, parent_pk, reason)
-                            if r_key not in seen_rejected:
-                                rejected.append({
-                                    "file1": child_table,
-                                    "file2": parent_table,
-                                    "column1": child_col,
-                                    "column2": parent_pk,
-                                    "overlap_count": overlap,
-                                    "child_distinct": len(child_values),
-                                    "parent_distinct": len(parent_values),
-                                    "child_to_parent_coverage": round(fk_coverage * 100, 2),
-                                    "parent_coverage": round(pk_coverage * 100, 2),
-                                    "reason": reason,
-                                })
-                                seen_rejected.add(r_key)
+                            _reject(child_table, child_col, parent_table, parent_pk,
+                                    child_values, parent_values, fk_coverage, pk_coverage, overlap,
+                                    "Rejected ID-to-ID relation: identifier entity core mismatch (e.g., ShoppingCartItemID cannot reference TerritoryID).")
                             continue
 
                         if not type_compatible:
-                            reason = "Rejected as SQL FK: incompatible data types between child and parent key columns."
-                            r_key = (child_table, child_col, parent_table, parent_pk, reason)
-                            if r_key not in seen_rejected:
-                                rejected.append({
-                                    "file1": child_table,
-                                    "file2": parent_table,
-                                    "column1": child_col,
-                                    "column2": parent_pk,
-                                    "overlap_count": overlap,
-                                    "child_distinct": len(child_values),
-                                    "parent_distinct": len(parent_values),
-                                    "child_to_parent_coverage": round(fk_coverage * 100, 2),
-                                    "parent_coverage": round(pk_coverage * 100, 2),
-                                    "reason": reason,
-                                })
-                                seen_rejected.add(r_key)
+                            _reject(child_table, child_col, parent_table, parent_pk,
+                                    child_values, parent_values, fk_coverage, pk_coverage, overlap,
+                                    "Rejected as SQL FK: incompatible data types between child and parent key columns.")
                             continue
 
                         key = (child_table, child_col, parent_table, parent_pk)
-
                         can_apply_fk, fk_reason = self._simulate_sql_fk_constraint(child_df[child_col], parent_df[parent_pk])
 
                         if can_apply_fk:
                             rel_type = "one-to-one" if child_is_unique else "many-to-one"
                             if rel_type == "one-to-one":
-                                # strict rule: allow 1:1 only when child table appears to be extension of parent entity
                                 parent_tokens = self._normalized_tokens(parent_table)
                                 child_tokens = self._normalized_tokens(child_table)
                                 if len(parent_tokens & child_tokens) == 0:
-                                    reason = "Rejected 1:1: uniqueness exists but no clear parent-child entity extension semantics."
-                                    r_key = (child_table, child_col, parent_table, parent_pk, reason)
-                                    if r_key not in seen_rejected:
-                                        rejected.append({
-                                            "file1": child_table,
-                                            "file2": parent_table,
-                                            "column1": child_col,
-                                            "column2": parent_pk,
-                                            "overlap_count": overlap,
-                                            "child_distinct": len(child_values),
-                                            "parent_distinct": len(parent_values),
-                                            "child_to_parent_coverage": round(fk_coverage * 100, 2),
-                                            "parent_coverage": round(pk_coverage * 100, 2),
-                                            "reason": reason,
-                                        })
-                                        seen_rejected.add(r_key)
+                                    _reject(child_table, child_col, parent_table, parent_pk,
+                                            child_values, parent_values, fk_coverage, pk_coverage, overlap,
+                                            "Rejected 1:1: uniqueness exists but no clear parent-child entity extension semantics.")
                                     continue
 
-                            confidence = "high"
+                            child_profile = self._get_column_id_profile(child_table, child_col)
                             reasoning = (
                                 f"Engine-valid FK simulation passed: all {len(child_values)} distinct child values "
-                                f"exist in parent key values ({overlap}/{len(child_values)})."
+                                f"exist in parent key values ({overlap}/{len(child_values)}). "
+                                f"Child ID confidence: {child_profile.get('total_score', 0):.0f}%."
                             )
                             if key not in seen_confirmed:
                                 confirmed.append({
@@ -531,46 +748,107 @@ class SchemaAnalyzer:
                                     "column1": child_col,
                                     "column2": parent_pk,
                                     "relationship_type": rel_type,
-                                    "confidence": confidence,
+                                    "confidence": "high",
                                     "match_percentage": round(fk_coverage * 100, 2),
                                     "overlap_count": overlap,
                                     "reasoning": reasoning,
                                     "is_primary_key": True,
                                     "is_foreign_key": True,
                                     "recommendation": "keep",
+                                    "child_id_score": child_profile.get("total_score", 0),
                                 })
                                 seen_confirmed.add(key)
                         else:
-                            reason = fk_reason
-                            r_key = (child_table, child_col, parent_table, parent_pk, reason)
-                            if r_key not in seen_rejected:
-                                rejected.append({
-                                    "file1": child_table,
-                                    "file2": parent_table,
-                                    "column1": child_col,
-                                    "column2": parent_pk,
-                                    "overlap_count": overlap,
-                                    "child_distinct": len(child_values),
-                                    "parent_distinct": len(parent_values),
-                                    "child_to_parent_coverage": round(fk_coverage * 100, 2),
-                                    "parent_coverage": round(pk_coverage * 100, 2),
-                                    "reason": reason,
-                                })
-                                seen_rejected.add(r_key)
+                            _reject(child_table, child_col, parent_table, parent_pk,
+                                    child_values, parent_values, fk_coverage, pk_coverage, overlap,
+                                    fk_reason)
 
+                            # Promote to suspicious if substantial coverage
                             if fk_coverage >= 0.4:
                                 s_key = (child_table, child_col, f"{parent_table}.{parent_pk}")
                                 if s_key not in seen_suspicious:
+                                    child_profile = self._get_column_id_profile(child_table, child_col)
                                     suspicious.append({
                                         "table": child_table,
                                         "column": child_col,
                                         "possible_reference": f"{parent_table}.{parent_pk}",
                                         "overlap_count": overlap,
                                         "coverage": round(fk_coverage * 100, 2),
-                                        "reason": "Partial referential overlap detected, but FK constraint would fail in SQL Server.",
+                                        "child_id_score": child_profile.get("total_score", 0),
+                                        "parent_key_tier": "strict",
+                                        "reason": f"Partial referential overlap detected (FK constraint failed: {fk_reason}).",
                                     })
                                     seen_suspicious.add(s_key)
 
+        # ── Phase 2: Suspicious relationships against probable PKs ──────────
+        # These are NOT confirmed – parent key is not strict PK.
+        confirmed_keys = set(seen_confirmed)
+        for parent_table, parent_df in self.datasets.items():
+            probable_pks = pk_map.get(parent_table, {}).get("probable", [])
+            if not probable_pks:
+                continue
+
+            for parent_pk in probable_pks:
+                parent_values = self._value_set(parent_df[parent_pk])
+                if not parent_values:
+                    continue
+
+                for child_table, child_df in self.datasets.items():
+                    if child_table == parent_table:
+                        continue
+
+                    for child_col in child_df.columns:
+                        child_dtype = str(child_df[child_col].dtype)
+                        if not self._is_fk_candidate(child_table, child_col, child_dtype, child_df[child_col]):
+                            continue
+
+                        # Skip if already confirmed or already suspicious for this pair
+                        key = (child_table, child_col, parent_table, parent_pk)
+                        if key in confirmed_keys:
+                            continue
+                        s_key = (child_table, child_col, f"{parent_table}.{parent_pk}")
+                        if s_key in seen_suspicious:
+                            continue
+
+                        if not self._is_identifier_like(child_col) or not self._is_identifier_like(parent_pk):
+                            continue
+                        if not self._are_types_fk_compatible(child_df[child_col], parent_df[parent_pk]):
+                            continue
+                        if not self._identifier_entity_compatible(child_table, child_col, parent_table, parent_pk):
+                            continue
+
+                        child_values = self._value_set(child_df[child_col])
+                        if not child_values:
+                            continue
+
+                        intersection = child_values & parent_values
+                        overlap = len(intersection)
+                        if overlap == 0:
+                            continue
+
+                        fk_coverage = overlap / len(child_values)
+                        if fk_coverage < 0.4:
+                            continue
+
+                        child_profile = self._get_column_id_profile(child_table, child_col)
+                        parent_profile = self._get_column_id_profile(parent_table, parent_pk)
+                        suspicious.append({
+                            "table": child_table,
+                            "column": child_col,
+                            "possible_reference": f"{parent_table}.{parent_pk}",
+                            "overlap_count": overlap,
+                            "coverage": round(fk_coverage * 100, 2),
+                            "child_id_score": child_profile.get("total_score", 0),
+                            "parent_id_score": parent_profile.get("total_score", 0),
+                            "parent_key_tier": "probable",
+                            "reason": (
+                                f"Parent key '{parent_pk}' is probable PK (not strict). "
+                                f"Coverage={fk_coverage*100:.1f}%. Cannot confirm without strict parent uniqueness."
+                            ),
+                        })
+                        seen_suspicious.add(s_key)
+
+        # ── Phase 3: Flag disallowed columns as suspicious ──────────────────
         for table_name, schema in self.schemas.items():
             for col in schema["column_details"]:
                 if self._is_disallowed_for_key(col["name"], col["dtype"]):
@@ -586,27 +864,50 @@ class SchemaAnalyzer:
                         })
                         seen_suspicious.add(s_key)
 
+        # Sort suspicious by coverage desc for easy review
+        suspicious.sort(key=lambda x: -x.get("coverage", 0))
+
         self.confirmed_relationships = confirmed
         self.rejected_relationships = rejected
         self.suspicious_columns = suspicious
         self.relationships = confirmed
+        self._last_pk_map = pk_map  # cache for get_relationship_audit
         self.junction_tables = self._detect_junction_tables(confirmed, pk_map)
         self.final_erd_structure = self._build_final_erd_structure(confirmed)
-        self.modeling_observations = self._build_modeling_observations(pk_map, confirmed, rejected)
+        self.modeling_observations = self._build_modeling_observations(pk_map, confirmed, rejected, suspicious)
+
+        n_susp_refs = sum(1 for s in suspicious if s.get("possible_reference"))
         if confirmed:
             self.erd_summary = (
                 f"Enforceable ERD: {len(confirmed)} FK relationship(s) passed SQL-Server-like constraint checks. "
+                f"{n_susp_refs} suspicious relationship(s) need review. "
                 f"Only engine-valid constraints are included."
             )
         else:
-            self.erd_summary = "No enforceable FK constraints detected under strict SQL-Server-like validation."
+            self.erd_summary = (
+                f"No enforceable FK constraints detected under strict SQL-Server-like validation. "
+                f"{n_susp_refs} suspicious relationship(s) found that may warrant data cleanup."
+            )
         logger.info(
-            "Strict schema analysis: %d confirmed, %d rejected, %d suspicious",
+            "Schema analysis: %d confirmed, %d rejected, %d suspicious",
             len(confirmed), len(rejected), len(suspicious)
         )
         return self.relationships
 
     def get_relationship_audit(self) -> Dict[str, Any]:
+        pk_map = getattr(self, "_last_pk_map", None)
+        if pk_map is None:
+            pk_map = self._detect_primary_keys() if self.datasets else {}
+
+        # Build per-table id_profiles summary from schema
+        id_profiles_summary: Dict[str, Dict[str, Dict]] = {}
+        for table_name, schema in self.schemas.items():
+            id_profiles_summary[table_name] = {}
+            for cd in schema.get("column_details", []):
+                prof = cd.get("id_profile")
+                if prof:
+                    id_profiles_summary[table_name][cd["name"]] = prof
+
         return {
             "confirmed_relationships": self.confirmed_relationships,
             "rejected_relationships": self.rejected_relationships,
@@ -615,9 +916,12 @@ class SchemaAnalyzer:
             "final_erd_structure": getattr(self, "final_erd_structure", {}),
             "data_modeling_observations": getattr(self, "modeling_observations", []),
             "erd_summary": getattr(self, "erd_summary", ""),
+            "pk_map": pk_map,
+            "id_profiles": id_profiles_summary,
         }
 
-    def _detect_junction_tables(self, confirmed: List[Dict[str, Any]], pk_map: Dict[str, List[str]]) -> List[Dict[str, Any]]:
+    def _detect_junction_tables(self, confirmed: List[Dict[str, Any]], pk_map: Dict[str, Dict[str, List[str]]]) -> List[Dict[str, Any]]:
+        """Detect junction/associative tables that FK to multiple parents."""
         by_child: Dict[str, List[Dict[str, Any]]] = {}
         for rel in confirmed:
             by_child.setdefault(rel["file1"], []).append(rel)
@@ -630,7 +934,9 @@ class SchemaAnalyzer:
 
             child_cols = set(self.datasets[child_table].columns)
             fk_cols = {r["column1"] for r in rels}
-            pk_candidates = set(pk_map.get(child_table, []))
+            # pk_map now has {"strict": [...], "probable": [...]}
+            pk_entry = pk_map.get(child_table, {})
+            pk_candidates = set(pk_entry.get("strict", []) + pk_entry.get("probable", []))
 
             if pk_candidates and (pk_candidates & fk_cols):
                 extra_cols = list(child_cols - fk_cols)
@@ -673,22 +979,51 @@ class SchemaAnalyzer:
 
     def _build_modeling_observations(
         self,
-        pk_map: Dict[str, List[str]],
+        pk_map: Dict[str, Dict[str, List[str]]],
         confirmed: List[Dict[str, Any]],
         rejected: List[Dict[str, Any]],
+        suspicious: Optional[List[Dict[str, Any]]] = None,
     ) -> List[str]:
         observations: List[str] = []
 
-        tables_without_pk = [t for t, pks in pk_map.items() if len(pks) == 0]
-        if tables_without_pk:
+        # Tables with no strict PK
+        tables_without_strict = [
+            t for t, entry in pk_map.items()
+            if len(entry.get("strict", [])) == 0
+        ]
+        tables_with_probable_only = [
+            t for t in tables_without_strict
+            if len(pk_map.get(t, {}).get("probable", [])) > 0
+        ]
+        tables_no_pk_at_all = [
+            t for t in tables_without_strict
+            if len(pk_map.get(t, {}).get("probable", [])) == 0
+        ]
+
+        if tables_no_pk_at_all:
             observations.append(
-                f"{len(tables_without_pk)} table(s) have no enforceable PK candidate: {', '.join(sorted(tables_without_pk)[:8])}."
+                f"{len(tables_no_pk_at_all)} table(s) have no PK candidate (strict or probable): "
+                f"{', '.join(sorted(tables_no_pk_at_all)[:8])}."
+            )
+        if tables_with_probable_only:
+            observations.append(
+                f"{len(tables_with_probable_only)} table(s) have probable PKs but no strict PK: "
+                f"{', '.join(sorted(tables_with_probable_only)[:8])}. "
+                "These may need null cleanup or dedup to become enforceable."
             )
 
         if rejected:
             observations.append(
                 f"{len(rejected)} candidate relationship(s) were rejected because SQL FK enforcement would fail."
             )
+
+        if suspicious:
+            ref_suspicious = [s for s in suspicious if s.get("possible_reference")]
+            if ref_suspicious:
+                observations.append(
+                    f"{len(ref_suspicious)} suspicious relationship(s) detected with partial referential overlap "
+                    f"that may indicate data-quality issues or missing constraints."
+                )
 
         if confirmed:
             one_to_one = sum(1 for r in confirmed if r.get("relationship_type") == "one-to-one")

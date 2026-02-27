@@ -925,3 +925,51 @@ postgres sql, my sql , orcal , mssql etc ...
 بعديننننن
 
 
+
+
+
+following pages:
+
+ Data Cleaning page
+ Data Quality page
+ KPIs page
+
+Currently, the dataset names are displayed side-by-side for selection. This approach is not scalable or user-friendly, especially when the number of datasets becomes large (for example, 50 or more datasets), as it takes too much space and makes navigation difficult.
+
+I want to improve the dataset selection UX on the following pages:
+
+* Data Cleaning page
+* Data Quality page
+* KPIs page
+
+**Required frontend changes (React):**
+
+1. Replace the current dataset name list with a **dropdown menu component** that contains all available datasets.
+
+2. The dropdown should:
+
+   * Display the current selected dataset
+   * Allow the user to select any dataset easily
+   * Be clean and scalable
+   * Support search if possible (optional but preferred)
+
+3. Add **navigation arrow buttons next to the dropdown:**
+
+   * **Previous button (←)** to select the previous dataset
+   * **Next button (→)** to select the next dataset
+
+4. When the user:
+
+   * Selects a dataset from the dropdown, or
+   * Clicks Previous/Next
+
+   The selected dataset state should update, and the page content should refresh accordingly.
+
+5. Implement this using React best practices:
+
+   * Use React state (useState or global state if applicable)
+   * Ensure reusable component design (e.g., DatasetSelector component)
+   * Ensure clean and maintainable code
+
+Goal:
+Improve usability and navigation between datasets on the Data Cleaning, Data Quality, and KPIs pages by using a dropdown selector and navigation arrows instead of displaying all dataset names at once.

@@ -12,6 +12,8 @@ from typing import Dict, List, Tuple
 import logging
 import ollama
 
+from analysis.viz_rules import classify_columns, is_id_column
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -30,9 +32,16 @@ class AdvancedAnalyzer:
         self.dataset_name = dataset_name
         self.model = model
         self.goals = goals or {"problem": "", "objective": "", "target": ""}
-        self.numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-        self.categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
-        self.datetime_cols = df.select_dtypes(include=['datetime64']).columns.tolist()
+        
+        # Classify columns using centralized rules — filter out ID columns
+        classes = classify_columns(df)
+        self.numeric_cols = classes['measures']  # Only measures, not IDs
+        self.categorical_cols = classes['dimensions']  # Only dimensions, not IDs
+        self.datetime_cols = classes['dates']
+        self.id_cols = classes['identifiers']  # Track them for reference
+        
+        if self.id_cols:
+            logger.info(f"Excluded {len(self.id_cols)} ID columns from analysis: {self.id_cols}")
     
     def run_complete_analysis(self) -> Dict:
         """Run comprehensive senior-level analysis"""
@@ -277,31 +286,24 @@ class AdvancedAnalyzer:
             weaknesses.append(f"⚠️ Missing dates: {stats['missing_pct']:.1f}%")
         
         insights = [f"Date range: {stats['min_date'].strftime('%Y-%m-%d')} to {stats['max_date'].strftime('%Y-%m-%d')}"]
-        prompt = f"""As a senior data analyst, provide insights about this numeric column through the lens of our business context:
-- Problem: {self.goals['problem']}
-- Objective: {self.goals['objective']}
-- Target Audience: {self.goals['target']}
+        
+        # Generate AI insights for datetime column
+        prompt = f"""As a senior data analyst, provide insights about this datetime column:
 
 Column: {col}
-Mean: {stats['mean']:.2f}
-Median: {stats['median']:.2f}
-Std Dev: {stats['std']:.2f}
-Range: {stats['min']:.2f} to {stats['max']:.2f}
-Skewness: {stats['skewness']:.2f}
+Date Range: {stats['min_date'].strftime('%Y-%m-%d')} to {stats['max_date'].strftime('%Y-%m-%d')}
+Total Days: {stats['date_range_days']}
+Unique Dates: {stats['unique']}
 Missing: {stats['missing_pct']:.1f}%
-Outliers: {outlier_pct:.1f}%
-Coefficient of Variation: {stats['cv']:.1f}%
 
 Provide actionable insights (each as one clear sentence):"""
         
         try:
             response = ollama.generate(model=self.model, prompt=prompt)
             insights_text = response['response'].strip()
-            insights = [line.strip() for line in insights_text.split('\n') if line.strip() and len(line.strip()) > 10]
-            return insights[:4]
+            insights = [line.strip() for line in insights_text.split('\n') if line.strip() and len(line.strip()) > 10][:4]
         except Exception as e:
-            logger.error(f"Error generating insights: {e}")
-            return [f"Date range: {stats['min_date'].strftime('%Y-%m-%d')} to {stats['max_date'].strftime('%Y-%m-%d')}"]
+            logger.error(f"Error generating datetime insights: {e}")
         
         visualizations = []
         
@@ -387,7 +389,7 @@ Provide actionable insights (each as one clear sentence):"""
             yaxis_title="Frequency Count",
             showlegend=True
         )
-        visualizations.append({"title": f"Distribution: {col}", "figure": fig})
+        visualizations.append({"title": f"Distribution of {col}", "figure": fig})
         
         # 2. Box plot for outlier detection
         iqr = stats['q3'] - stats['q1']
@@ -398,8 +400,8 @@ Provide actionable insights (each as one clear sentence):"""
             boxmean='sd',
             marker_color='lightgreen'
         ))
-        fig.update_layout(title=f"📦 Outlier Detection & Quartile Analysis: {col} | IQR: {iqr:.2f} | Range: [{stats['min']:.2f}, {stats['max']:.2f}]")
-        visualizations.append({"title": f"Box Plot: {col}", "figure": fig})
+        fig.update_layout(title=f"📦 SUM of {col} — Outlier Detection | IQR: {iqr:.2f} | Range: [{stats['min']:.2f}, {stats['max']:.2f}]")
+        visualizations.append({"title": f"SUM of {col} (Box Plot)", "figure": fig})
         
         return visualizations
     
@@ -418,28 +420,29 @@ Provide actionable insights (each as one clear sentence):"""
             textposition='outside'
         ))
         fig.update_layout(
-            title=f"📊 Category Performance Ranking: {col} | Top Categories (Total: {total_count:,} records)",
-            xaxis_title=f"{col} Categories",
-            yaxis_title="Count",
+            title=f"📊 COUNT of Records by {col} | Top Categories (Total: {total_count:,} records)",
+            xaxis_title=f"{col}",
+            yaxis_title="COUNT of Records",
             xaxis_tickangle=-45
         )
-        visualizations.append({"title": f"Categories: {col}", "figure": fig})
+        visualizations.append({"title": f"COUNT of Records by {col}", "figure": fig})
         
-        # Pie chart
+        # Pie chart — limit to top 6 slices for readability
+        top_n = value_counts.head(6)
         fig = go.Figure(data=[go.Pie(
-            labels=value_counts.index,
-            values=value_counts.values,
+            labels=top_n.index,
+            values=top_n.values,
             hole=0.3
         )])
-        fig.update_layout(title=f"🥧 Market Share Breakdown: {col} | Proportional Distribution Analysis")
-        visualizations.append({"title": f"Pie Chart: {col}", "figure": fig})
+        fig.update_layout(title=f"🥧 COUNT of Records by {col} | Proportional Distribution")
+        visualizations.append({"title": f"COUNT of Records by {col} (Pie)", "figure": fig})
         
         return visualizations
     
     def _deep_correlation_analysis(self) -> Dict:
-        """Deep correlation analysis with insights"""
+        """Deep correlation analysis with insights — using only measure columns (no IDs)"""
         if len(self.numeric_cols) < 2:
-            return {"status": "Not enough numeric columns"}
+            return {"status": "Not enough numeric measure columns for correlation"}
         
         corr_matrix = self.df[self.numeric_cols].corr()
         
@@ -468,7 +471,7 @@ Provide actionable insights (each as one clear sentence):"""
             textfont={"size": 10}
         ))
         fig.update_layout(
-            title=f"🔥 Comprehensive Correlation Matrix: Identifying Variable Interdependencies | {len(corr_matrix)} x {len(corr_matrix)} Matrix",
+            title=f"🔥 Correlation Matrix (Measures Only) | {len(corr_matrix)} x {len(corr_matrix)} Variables",
             width=800,
             height=700
         )

@@ -14,6 +14,11 @@ import re
 
 from models.pandas_agent_chatbot import PandasAgentChatbot
 from analysis.visualization import Visualizer
+from analysis.viz_rules import (
+    classify_columns, is_id_column, is_date_column,
+    validate_chart_spec, format_chart_title,
+    get_measures, get_dimensions, get_dates,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -277,11 +282,6 @@ class HybridChatbot:
                 if default_graphs:
                     graphs.extend(default_graphs)
                     logger.info(f"✅ Created {len(default_graphs)} smart default visualization(s)")
-                # Create intelligent default visualizations based on data types
-                default_graphs = self._create_smart_default_charts()
-                if default_graphs:
-                    graphs.extend(default_graphs)
-                    logger.info(f"✅ Created {len(default_graphs)} smart default visualization(s)")
             
         except Exception as e:
             logger.error(f"❌ Error generating visualizations: {str(e)}")
@@ -308,32 +308,23 @@ class HybridChatbot:
         return obj
 
     def _is_id_like_column(self, series: pd.Series, col_name: str) -> bool:
-        name = str(col_name).lower()
-        tokens = [t for t in re.split(r'[^a-z0-9]+', name) if t]
-        if name in {'id', 'uuid', 'guid'} or name.endswith('_id'):
-            return True
-        if any(t in {'id', 'key', 'pk', 'fk', 'uuid', 'guid', 'rowguid'} for t in tokens):
-            return True
-        non_null = series.dropna()
-        if len(non_null) == 0:
-            return False
-        uniqueness_ratio = float(non_null.nunique()) / float(len(non_null))
-        return pd.api.types.is_integer_dtype(series) and uniqueness_ratio >= 0.98
+        """Delegate to centralized viz_rules"""
+        return is_id_column(series, col_name)
 
     def _numeric_measures(self) -> List[str]:
-        return [
-            col for col in self.df.select_dtypes(include=[np.number]).columns
-            if not self._is_id_like_column(self.df[col], col)
-        ]
+        """Get measure columns using centralized rules"""
+        return get_measures(self.df)
 
     def _categorical_dimensions(self) -> List[str]:
-        return [
-            col for col in self.df.select_dtypes(include=['object', 'category']).columns
-            if not self._is_id_like_column(self.df[col], col)
-        ]
+        """Get dimension columns using centralized rules"""
+        return get_dimensions(self.df)
+    
+    def _date_columns(self) -> List[str]:
+        """Get date columns using centralized rules"""
+        return get_dates(self.df)
     
     def _create_ranking_charts(self, question: str, answer: str) -> List[Dict]:
-        """Create powerful ranking/top-N charts with better detection"""
+        """Create powerful ranking/top-N charts with validation"""
         graphs = []
         
         try:
@@ -341,7 +332,6 @@ class HybridChatbot:
             numeric_cols = self._numeric_measures()
             
             if len(categorical_cols) > 0 and len(numeric_cols) > 0:
-                # Try to detect which columns are mentioned in question
                 cat_col = categorical_cols[0]
                 num_col = numeric_cols[0]
                 
@@ -356,6 +346,12 @@ class HybridChatbot:
                         num_col = col
                         break
                 
+                # Validate chart spec
+                valid, reason = validate_chart_spec(self.df, 'bar', cat_col, num_col)
+                if not valid:
+                    logger.warning(f"Ranking chart blocked: {reason}")
+                    return graphs
+                
                 # Determine if we want top or bottom
                 n = 10
                 if 'bottom' in question.lower() or 'worst' in question.lower() or 'lowest' in question.lower() or 'least' in question.lower():
@@ -366,12 +362,13 @@ class HybridChatbot:
                     title_prefix = "Top"
                 
                 if not top_data.empty and len(top_data) > 1:
+                    title = f"{title_prefix} {len(top_data)} — SUM of {num_col} by {cat_col}"
                     fig = px.bar(
                         x=self._sanitize_for_json(top_data.values),
                         y=self._sanitize_for_json(top_data.index),
                         orientation='h',
-                        title=f"{title_prefix} {len(top_data)} {cat_col} by {num_col}",
-                        labels={'x': str(num_col), 'y': str(cat_col)},
+                        title=title,
+                        labels={'x': f'SUM of {num_col}', 'y': str(cat_col)},
                         color=self._sanitize_for_json(top_data.values),
                         color_continuous_scale='Blues'
                     )
@@ -384,7 +381,7 @@ class HybridChatbot:
                     
                     graphs.append({
                         "type": "ranking_bar",
-                        "title": f"{title_prefix} {cat_col} by {num_col}",
+                        "title": title,
                         "figure": fig
                     })
         except Exception as e:
@@ -393,7 +390,7 @@ class HybridChatbot:
         return graphs
     
     def _create_comparison_charts(self, question: str, answer: str) -> List[Dict]:
-        """Create powerful comparison charts"""
+        """Create comparison charts with proper validation"""
         graphs = []
         
         try:
@@ -405,7 +402,12 @@ class HybridChatbot:
                 cat_col = categorical_cols[0]
                 num_col = numeric_cols[0]
                 
-                # Get top categories to compare
+                # Validate
+                valid, reason = validate_chart_spec(self.df, 'bar', cat_col, num_col)
+                if not valid:
+                    logger.warning(f"Comparison chart blocked: {reason}")
+                    return graphs
+                
                 top_cats = self.df[cat_col].value_counts().head(8).index
                 df_filtered = self.df[self.df[cat_col].isin(top_cats)]
                 
@@ -414,20 +416,20 @@ class HybridChatbot:
                     
                     fig = go.Figure()
                     fig.add_trace(go.Bar(
-                        name='Total',
+                        name=f'SUM of {num_col}',
                         x=self._sanitize_for_json(agg_data[cat_col]),
                         y=self._sanitize_for_json(agg_data['sum']),
                         marker_color='lightblue'
                     ))
                     fig.add_trace(go.Bar(
-                        name='Average',
+                        name=f'AVG of {num_col}',
                         x=self._sanitize_for_json(agg_data[cat_col]),
                         y=self._sanitize_for_json(agg_data['mean']),
                         marker_color='darkblue'
                     ))
                     
                     fig.update_layout(
-                        title=f"Comparison of {num_col} by {cat_col}",
+                        title=f"Comparison: SUM vs AVG of {num_col} by {cat_col}",
                         barmode='group',
                         height=450,
                         xaxis_tickangle=-45
@@ -435,7 +437,7 @@ class HybridChatbot:
                     
                     graphs.append({
                         "type": "comparison_grouped_bar",
-                        "title": f"{num_col} Comparison by {cat_col}",
+                        "title": f"SUM vs AVG of {num_col} by {cat_col}",
                         "figure": fig
                     })
             
@@ -445,7 +447,7 @@ class HybridChatbot:
                 for col in numeric_cols[:4]:
                     fig.add_trace(go.Bar(
                         name=str(col),
-                        x=['Mean', 'Median', 'Max'],
+                        x=['AVG', 'MEDIAN', 'MAX'],
                         y=[
                             float(self.df[col].mean()),
                             float(self.df[col].median()),
@@ -454,14 +456,14 @@ class HybridChatbot:
                     ))
                 
                 fig.update_layout(
-                    title="Statistical Comparison Across Columns",
+                    title="Statistical Comparison of Business Measures",
                     barmode='group',
                     height=450
                 )
                 
                 graphs.append({
                     "type": "comparison_stats",
-                    "title": "Column Statistics Comparison",
+                    "title": "Measures Statistical Comparison",
                     "figure": fig
                 })
         except Exception as e:
@@ -470,22 +472,28 @@ class HybridChatbot:
         return graphs
     
     def _create_trend_charts(self, question: str) -> List[Dict]:
-        """Create powerful trend/time-series charts"""
+        """Create trend/time-series charts — ONLY with date columns on X-axis"""
         graphs = []
         
         try:
-            # Try to find datetime columns
-            datetime_cols = self.df.select_dtypes(include=['datetime64']).columns.tolist()
+            # Use centralized date detection
+            datetime_cols = self._date_columns()
             
-            # Also check for date-like string columns
-            if len(datetime_cols) == 0:
+            # Also check datetime dtype columns as fallback
+            if not datetime_cols:
                 for col in self.df.columns:
-                    if any(word in col.lower() for word in ['date', 'time', 'year', 'month', 'day']):
-                        try:
-                            self.df[col] = pd.to_datetime(self.df[col])
+                    if pd.api.types.is_datetime64_any_dtype(self.df[col]):
+                        if not is_id_column(self.df[col], col):
                             datetime_cols.append(col)
-                        except:
-                            pass
+                # Also try date-like string columns
+                if not datetime_cols:
+                    for col in self.df.columns:
+                        if any(word in col.lower() for word in ['date', 'time', 'year', 'month', 'day']):
+                            try:
+                                pd.to_datetime(self.df[col].dropna().head(20))
+                                datetime_cols.append(col)
+                            except:
+                                pass
             
             numeric_cols = self._numeric_measures()
             
@@ -499,20 +507,26 @@ class HybridChatbot:
                         num_col = col
                         break
                 
+                # Validate: line chart MUST have time on X-axis
+                valid, reason = validate_chart_spec(self.df, 'line', date_col, num_col)
+                if not valid:
+                    logger.warning(f"Trend chart blocked: {reason}")
+                    return graphs
+                
                 df_sorted = self.df.sort_values(date_col).copy()
-                df_sorted[date_col] = pd.to_datetime(df_sorted[date_col])
+                df_sorted[date_col] = pd.to_datetime(df_sorted[date_col], errors='coerce')
+                df_sorted = df_sorted.dropna(subset=[date_col])
                 df_sorted[num_col] = df_sorted[num_col].astype(float)
                 
-                # Add trend line
+                title = f"SUM of {num_col} Trend Over {date_col}"
                 fig = px.line(
                     df_sorted,
                     x=date_col,
                     y=num_col,
-                    title=f"Trend: {num_col} Over Time",
+                    title=title,
                     markers=True
                 )
                 
-                # Add trend annotation
                 fig.update_traces(line=dict(width=3))
                 fig.update_layout(
                     hovermode='x unified',
@@ -521,16 +535,18 @@ class HybridChatbot:
                 
                 graphs.append({
                     "type": "trend_line",
-                    "title": f"{num_col} Trend Over Time",
+                    "title": title,
                     "figure": fig
                 })
+            else:
+                logger.info("No date columns found — cannot create line chart (line charts require time-based data)")
         except Exception as e:
             logger.error(f"Error creating trend chart: {str(e)}")
         
         return graphs
     
     def _create_breakdown_charts(self, question: str) -> List[Dict]:
-        """Create breakdown/composition charts"""
+        """Create breakdown/composition charts with validation"""
         graphs = []
         
         try:
@@ -546,45 +562,73 @@ class HybridChatbot:
                         cat_col = col
                         break
                 
+                # Check: pie chart max 6 categories, otherwise use bar
+                n_unique = self.df[cat_col].nunique()
+                
                 if len(numeric_cols) > 0:
-                    # Breakdown with values
                     num_col = numeric_cols[0]
                     breakdown_data = self.df.groupby(cat_col)[num_col].sum().nlargest(10)
                     
                     if not breakdown_data.empty:
-                        fig = px.pie(
-                            values=self._sanitize_for_json(breakdown_data.values),
-                            names=self._sanitize_for_json(breakdown_data.index),
-                            title=f"Breakdown of {num_col} by {cat_col}",
-                            hole=0.3
-                        )
-                        
-                        fig.update_traces(textposition='inside', textinfo='percent+label')
-                        fig.update_layout(height=450)
-                        
-                        graphs.append({
-                            "type": "breakdown_pie",
-                            "title": f"{num_col} by {cat_col}",
-                            "figure": fig
-                        })
+                        if n_unique <= 6:
+                            # Pie chart for small number of categories
+                            valid, reason = validate_chart_spec(self.df, 'pie', cat_col, num_col)
+                            if valid:
+                                fig = px.pie(
+                                    values=self._sanitize_for_json(breakdown_data.values),
+                                    names=self._sanitize_for_json(breakdown_data.index),
+                                    title=f"SUM of {num_col} by {cat_col}",
+                                    hole=0.3
+                                )
+                                fig.update_traces(textposition='inside', textinfo='percent+label')
+                                fig.update_layout(height=450)
+                                graphs.append({
+                                    "type": "breakdown_pie",
+                                    "title": f"SUM of {num_col} by {cat_col}",
+                                    "figure": fig
+                                })
+                        else:
+                            # Bar chart for many categories
+                            valid, reason = validate_chart_spec(self.df, 'bar', cat_col, num_col)
+                            if valid:
+                                fig = px.bar(
+                                    x=self._sanitize_for_json(breakdown_data.values),
+                                    y=self._sanitize_for_json(breakdown_data.index),
+                                    orientation='h',
+                                    title=f"SUM of {num_col} Breakdown by {cat_col} (Top 10)",
+                                    labels={'x': f'SUM of {num_col}', 'y': cat_col}
+                                )
+                                fig.update_layout(height=450)
+                                graphs.append({
+                                    "type": "breakdown_bar",
+                                    "title": f"SUM of {num_col} by {cat_col}",
+                                    "figure": fig
+                                })
                 else:
                     # Count breakdown
                     breakdown_data = self.df[cat_col].value_counts().head(10)
                     
                     if not breakdown_data.empty:
-                        fig = px.pie(
-                            values=self._sanitize_for_json(breakdown_data.values),
-                            names=self._sanitize_for_json(breakdown_data.index),
-                            title=f"Breakdown by {cat_col}",
-                            hole=0.3
-                        )
-                        
-                        fig.update_traces(textposition='inside', textinfo='percent+label')
+                        if n_unique <= 6:
+                            fig = px.pie(
+                                values=self._sanitize_for_json(breakdown_data.values),
+                                names=self._sanitize_for_json(breakdown_data.index),
+                                title=f"COUNT Distribution by {cat_col}",
+                                hole=0.3
+                            )
+                            fig.update_traces(textposition='inside', textinfo='percent+label')
+                        else:
+                            fig = px.bar(
+                                x=self._sanitize_for_json(breakdown_data.values),
+                                y=self._sanitize_for_json(breakdown_data.index),
+                                orientation='h',
+                                title=f"COUNT Distribution by {cat_col} (Top 10)",
+                                labels={'x': 'COUNT', 'y': cat_col}
+                            )
                         fig.update_layout(height=450)
-                        
                         graphs.append({
-                            "type": "breakdown_pie",
-                            "title": f"Breakdown by {cat_col}",
+                            "type": "breakdown_count",
+                            "title": f"COUNT by {cat_col}",
                             "figure": fig
                         })
         except Exception as e:
@@ -593,26 +637,32 @@ class HybridChatbot:
         return graphs
     
     def _create_smart_default_charts(self) -> List[Dict]:
-        """Create smart default visualizations based on data characteristics"""
+        """Create smart default visualizations with proper validation"""
         graphs = []
         
         try:
             numeric_cols = self._numeric_measures()
             categorical_cols = self._categorical_dimensions()
             
-            # If we have both categorical and numeric, create a bar chart
             if len(categorical_cols) > 0 and len(numeric_cols) > 0:
                 cat_col = categorical_cols[0]
                 num_col = numeric_cols[0]
                 
+                valid, reason = validate_chart_spec(self.df, 'bar', cat_col, num_col)
+                if not valid:
+                    logger.warning(f"Smart default chart blocked: {reason}")
+                    return graphs
+                
                 top_data = self.df.groupby(cat_col)[num_col].sum().nlargest(10)
                 
                 if not top_data.empty:
+                    title = f"SUM of {num_col} by {cat_col} (Top 10)"
                     fig = px.bar(
                         x=self._sanitize_for_json(top_data.values),
                         y=self._sanitize_for_json(top_data.index),
                         orientation='h',
-                        title=f"{num_col} by {cat_col}",
+                        title=title,
+                        labels={'x': f'SUM of {num_col}', 'y': cat_col},
                         color=self._sanitize_for_json(top_data.values),
                         color_continuous_scale='Viridis'
                     )
@@ -621,7 +671,7 @@ class HybridChatbot:
                     
                     graphs.append({
                         "type": "default_bar",
-                        "title": f"{num_col} by {cat_col}",
+                        "title": title,
                         "figure": fig
                     })
         except Exception as e:
@@ -661,12 +711,17 @@ class HybridChatbot:
         return graphs
     
     def _create_distribution_charts(self, question: str) -> List[Dict]:
-        """Create distribution charts"""
+        """Create distribution charts using only measure columns"""
         graphs = []
         
         numeric_cols = self._numeric_measures()[:2]
         
         for col in numeric_cols:
+            valid, reason = validate_chart_spec(self.df, 'histogram', col, None)
+            if not valid:
+                logger.warning(f"Distribution chart for {col} blocked: {reason}")
+                continue
+            
             df_clean = self.df[[col]].copy()
             df_clean[col] = df_clean[col].astype(float)
             
@@ -680,14 +735,14 @@ class HybridChatbot:
             
             graphs.append({
                 "type": "histogram",
-                "title": f"{col} Distribution",
+                "title": f"Distribution of {col}",
                 "figure": fig
             })
         
         return graphs
     
     def _create_correlation_charts(self, question: str) -> List[Dict]:
-        """Create correlation charts"""
+        """Create correlation charts using only measure columns (no IDs)"""
         graphs = []
         
         numeric_cols = self._numeric_measures()
@@ -703,11 +758,11 @@ class HybridChatbot:
                 zmid=0
             ))
             
-            fig.update_layout(title="Correlation Matrix")
+            fig.update_layout(title="Correlation Matrix (Business Measures Only)")
             
             graphs.append({
                 "type": "correlation_heatmap",
-                "title": "Correlation Analysis",
+                "title": "Correlation Analysis (Measures Only)",
                 "figure": fig
             })
         

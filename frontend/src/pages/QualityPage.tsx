@@ -5,6 +5,7 @@ import { engine } from '@/lib/api';
 import { loadPageState, savePageState } from '@/lib/pagePersistence';
 import { Button, Card, Badge, Spinner, EmptyState } from '@/components/ui';
 import { ShieldCheck, AlertTriangle, AlertCircle, Info, CheckCircle2, Lightbulb, Database } from 'lucide-react';
+import DatasetSelector from '@/components/DatasetSelector';
 import toast from 'react-hot-toast';
 
 interface Issue {
@@ -139,30 +140,22 @@ export default function QualityPage() {
 
       {result && (
         <div className="space-y-6">
-          {/* Dataset Tabs */}
+          {/* Dataset Selector */}
           {dsKeys.length > 1 && (
-            <div className="flex gap-2 flex-wrap">
-              {dsKeys.map((key) => {
-                const ds = result.datasets[key];
+            <DatasetSelector
+              datasets={dsKeys}
+              activeDataset={activeTab}
+              onSelect={(key) => { setActiveTab(key); setSeverityFilter('all'); }}
+              renderBadge={(key) => {
+                const ds = result!.datasets[key];
+                if (!ds) return null;
                 return (
-                  <button
-                    key={key}
-                    onClick={() => { setActiveTab(key); setSeverityFilter('all'); }}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition cursor-pointer ${
-                      activeTab === key
-                        ? 'bg-[var(--accent)] text-white'
-                        : 'bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-                    }`}
-                  >
-                    <Database className="w-3.5 h-3.5" />
-                    <span className="max-w-[200px] truncate">{key.replace('::', ' → ')}</span>
-                    <span className={`text-xs font-bold ${ds.quality_score >= 80 ? 'text-emerald-600' : ds.quality_score >= 60 ? 'text-amber-600' : 'text-red-600'}`}>
-                      {Math.round(ds.quality_score)}
-                    </span>
-                  </button>
+                  <span className={`text-xs font-bold ${ds.quality_score >= 80 ? 'text-emerald-600' : ds.quality_score >= 60 ? 'text-amber-600' : 'text-red-600'}`}>
+                    {Math.round(ds.quality_score)}
+                  </span>
                 );
-              })}
-            </div>
+              }}
+            />
           )}
 
           {/* Single dataset header when only one */}
